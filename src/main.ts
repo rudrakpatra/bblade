@@ -57,7 +57,7 @@ const currentLaunchAngle = { value: 0 };
 // -- Pointer Lock Drag Zone --
 const dragZone = document.createElement('div');
 dragZone.className = 'drag-zone';
-dragZone.title = "Click to Lock & Drag";
+dragZone.innerText = "Adjust Launch Angle";
 launchContainer.appendChild(dragZone);
 
 // Stop propagation to prevent camera orbit when clicking slider
@@ -443,6 +443,15 @@ class TrailSystem {
 
         positionAttribute.needsUpdate = true;
     }
+
+    clear() {
+        this.positions = [];
+        const positionAttribute = this.geometry.attributes.position as THREE.BufferAttribute;
+        for (let i = 0; i < this.maxPoints; i++) {
+            positionAttribute.setXYZ(i, 0, 0, 0);
+        }
+        positionAttribute.needsUpdate = true;
+    }
 }
 // --- Game Logic ---
 interface BeybladeStats {
@@ -451,9 +460,14 @@ interface BeybladeStats {
     def: number;    // Damage mitigation
     wt: number;     // Mass
     sta: number;    // RPM loss per second
-    spd: number;    // Launch speed factor
+    spd: number;    // Launch speed factor (Max Velocity)
     spl: number;    // Special charges (TBD)
     crt: number;    // Critical hit chance (0.0 - 1.0)
+    frictionAir: number;
+    // Physics Properties (Fixed defaults)
+    restitution: number;
+    friction: number;
+    densityBase: number;
 }
 
 interface GameEntity {
@@ -476,35 +490,70 @@ const PLAYER_STATS: BeybladeStats = {
     maxRpm: 1000,
     atk: 90,
     def: 50,
-    wt: 1.0,  // Standard weight
-    sta: 10,  // Reduced decay to match lower RPM scale? Or keep 50? 
-    // 50 decay on 1000 is 20s life. 50 on 5000 was 100s. 
-    // Let's lower STA slightly so they don't die too fast.
-    spd: 1.0,
+    wt: 1.0,
+    sta: 10,
+    spd: 120,
     spl: 0,
-    crt: 0.2  // 20% Crit Chance
+    crt: 0.2, // 20% crit
+    restitution: 0.1,
+    friction: 0.2,
+    frictionAir: 0.005,
+    densityBase: 0.05
 };
 
 const ENEMY_STATS: BeybladeStats = {
     maxRpm: 1000,
     atk: 80,
     def: 50,
-    wt: 0.2,
+    wt: 0.2, // Lighter
     sta: 15,
-    spd: 0.8,
+    spd: 100,
     spl: 0,
-    crt: 0.1
+    crt: 0.1, // 10% crit
+    restitution: 0.1,
+    friction: 0.2,
+    frictionAir: 0.005,
+    densityBase: 0.05
 };
+
+const DEFAULT_PLAYER_STATS = { ...PLAYER_STATS };
+const DEFAULT_ENEMY_STATS = { ...ENEMY_STATS };
+
+function savePresets() {
+    localStorage.setItem('bblade_player_stats', JSON.stringify(PLAYER_STATS));
+    localStorage.setItem('bblade_enemy_stats', JSON.stringify(ENEMY_STATS));
+    console.log('Presets Saved!');
+}
+
+function loadPresets() {
+    const pData = localStorage.getItem('bblade_player_stats');
+    const eData = localStorage.getItem('bblade_enemy_stats');
+    if (pData) Object.assign(PLAYER_STATS, JSON.parse(pData));
+    if (eData) Object.assign(ENEMY_STATS, JSON.parse(eData));
+}
+
+function resetPresets() {
+    localStorage.removeItem('bblade_player_stats');
+    localStorage.removeItem('bblade_enemy_stats');
+    Object.assign(PLAYER_STATS, DEFAULT_PLAYER_STATS);
+    Object.assign(ENEMY_STATS, DEFAULT_ENEMY_STATS);
+    console.log('Presets Reset to Defaults!');
+}
+
+// Load on Startup
+loadPresets();
 
 
 function createBeyblade(x: number, y: number, color: number, stats: BeybladeStats): GameEntity {
     // Physics Body - Mass derived from stats.wt
-    const density = 0.05 * stats.wt; // Base density * weight multiplier
+    // Physics Body - Mass derived from stats.wt and config density
+    // Physics Body - Mass derived from stats.wt and config density
+    const density = stats.densityBase * stats.wt;
 
     const body = Bodies.circle(x, y, BEYBLADE_RADIUS, {
-        restitution: 0.1,
-        friction: 0.2,
-        frictionAir: 0.005, // Lower air friction, we handle STA manually
+        restitution: stats.restitution,
+        friction: stats.friction,
+        frictionAir: stats.frictionAir,
         density: density,
         label: 'Beyblade'
     });
@@ -546,6 +595,7 @@ updateGuide(0);
 // --- Interaction State ---
 let isDragging = false;
 let hasLaunched = false;
+let gameOver = false;
 
 // Drag line visual (Three.js Line)
 const dragLineGeometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0)]);
@@ -583,6 +633,140 @@ hudTopBar.innerHTML = `
     </div>
 `;
 uiContainer.appendChild(hudTopBar);
+
+// Presets Button
+const presetsBtn = document.createElement('button');
+presetsBtn.className = 'presets-btn';
+presetsBtn.innerText = 'Presets';
+presetsBtn.onclick = openPresetsModal; // Moved handler here or keep at bottom
+uiContainer.appendChild(presetsBtn);
+
+// Presets Config Data Structure for UI Generation
+const PRESET_FIELDS = [
+    { key: 'maxRpm', label: 'RPM', hint: 'Spin Speed (HP)' },
+    { key: 'spd', label: 'SPD', hint: 'Launch Velocity' },
+    { key: 'atk', label: 'ATK', hint: 'Damage dealt' },
+    { key: 'def', label: 'DEF', hint: 'Damage reduction' },
+    { key: 'wt', label: 'WT', hint: 'Weight / Mass' },
+    { key: 'sta', label: 'STA', hint: 'Stamina / Endurance' },
+    { key: 'crt', label: 'CRT', hint: 'Crit Chance (0-1)' },
+    // Air Drag is still useful to tune feel, others are fixed
+    { key: 'frictionAir', label: 'Drag', hint: 'Air resistance' }
+];
+
+function createInput(id: string, label: string, value: number, hint: string, onChange: (val: number) => void) {
+    const div = document.createElement('div');
+    div.className = 'stat-item';
+
+    div.innerHTML = `
+        <label class="stat-label" for="${id}">${label}</label>
+        <input class="stat-input" type="number" step="0.01" id="${id}" value="${value}">
+        <span class="stat-hint">${hint}</span>
+    `;
+
+    const input = div.querySelector('input')!;
+    input.addEventListener('change', (e) => {
+        const val = parseFloat((e.target as HTMLInputElement).value);
+        onChange(val);
+    });
+
+    return div;
+}
+
+function openPresetsModal() {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+
+    const content = document.createElement('div');
+    content.className = 'modal-content';
+
+    // Header
+    const header = document.createElement('div');
+    header.className = 'modal-header';
+    header.innerHTML = `<span class="modal-title">Tune Presets</span>`;
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'modal-close';
+    closeBtn.innerText = '×';
+    closeBtn.onclick = () => { uiContainer.removeChild(overlay); };
+    header.appendChild(closeBtn);
+    content.appendChild(header);
+
+
+
+    // 1. Player Stats
+    const pSection = document.createElement('div');
+    pSection.className = 'stat-section';
+    pSection.innerHTML = `<div class="section-title">Player Stats</div>`;
+    const pGrid = document.createElement('div');
+    pGrid.className = 'stat-grid';
+    PRESET_FIELDS.forEach(field => {
+        pGrid.appendChild(createInput(
+            `p-${field.key}`,
+            field.label,
+            (PLAYER_STATS as any)[field.key],
+            field.hint,
+            (val) => { (PLAYER_STATS as any)[field.key] = val; }
+        ));
+    });
+    pSection.appendChild(pGrid);
+    content.appendChild(pSection);
+
+    // 2. Enemy Stats
+    const eSection = document.createElement('div');
+    eSection.className = 'stat-section';
+    eSection.innerHTML = `<div class="section-title">CPU Stats</div>`;
+    const eGrid = document.createElement('div');
+    eGrid.className = 'stat-grid';
+    PRESET_FIELDS.forEach(field => {
+        eGrid.appendChild(createInput(
+            `e-${field.key}`,
+            field.label,
+            (ENEMY_STATS as any)[field.key],
+            field.hint,
+            (val) => { (ENEMY_STATS as any)[field.key] = val; }
+        ));
+    });
+    eSection.appendChild(eGrid);
+    content.appendChild(eSection);
+
+
+
+    // Actions
+    const actions = document.createElement('div');
+    actions.className = 'preset-actions';
+
+    // Reset Button
+    const resetBtn = document.createElement('button');
+    resetBtn.className = 'action-btn reset'; // We can add a .reset class in CSS or just use action-btn
+    resetBtn.innerText = 'Reset Defaults';
+    resetBtn.style.marginRight = 'auto'; // Push to left
+    resetBtn.onclick = () => {
+        if (confirm('Reset all stats to default?')) {
+            resetPresets();
+            uiContainer.removeChild(overlay);
+            openPresetsModal(); // Re-open to refresh inputs
+        }
+    };
+    actions.appendChild(resetBtn);
+
+    // Save Button
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'action-btn save';
+    saveBtn.innerText = 'Save & Apply';
+    saveBtn.onclick = () => {
+        savePresets();
+        uiContainer.removeChild(overlay);
+        resetMatch(); // Soft reset
+    };
+    actions.appendChild(saveBtn);
+    content.appendChild(actions);
+
+    overlay.appendChild(content);
+    uiContainer.appendChild(overlay);
+}
+
+presetsBtn.onclick = openPresetsModal;
+
 
 // Reset Hint
 const resetHint = document.createElement('div');
@@ -641,7 +825,7 @@ for (let i = 0; i < bufferSize; i++) {
     data[i] = Math.random() * 2 - 1;
 }
 
-function playCollisionSound(intensity: number) {
+function playCollisionSound(intensity: number, isCrit: boolean) {
     if (audioCtx.state === 'suspended') {
         audioCtx.resume();
     }
@@ -679,7 +863,7 @@ function playCollisionSound(intensity: number) {
         const oscGain = audioCtx.createGain();
 
         osc.type = index % 2 == 0 ? 'square' : 'triangle';
-        osc.frequency.setValueAtTime(baseFreq * ratio, t);
+        osc.frequency.setValueAtTime(baseFreq * ratio * (isCrit ? 2 : 1), t);
 
         osc.connect(oscGain);
         oscGain.connect(masterGain);
@@ -732,7 +916,7 @@ Events.on(engine, 'collisionStart', (event) => {
                 }
             }
 
-            playCollisionSound(0.5);
+            playCollisionSound(isCrit ? 0.5 : 0.25, isCrit);
 
         } else {
             // Fallback / Wall hits
@@ -742,7 +926,7 @@ Events.on(engine, 'collisionStart', (event) => {
                     createSpark(x, y, 0xffaa00, 2);
                 }
             }
-            playCollisionSound(0.3);
+            playCollisionSound(0.1, false);
         }
     });
 });
@@ -838,6 +1022,16 @@ function animate() {
 
                 // Remove from Physics World
                 Composite.remove(engine.world, entity.body);
+
+                // Win Condition Check
+                if (!gameOver) {
+                    gameOver = true;
+                    if (entity === player) {
+                        showWinner('CPU WINS');
+                    } else if (entity === enemy) {
+                        showWinner('P1 WINS');
+                    }
+                }
             }
         }
 
@@ -1003,11 +1197,13 @@ launchBtn.addEventListener('click', () => {
 
     // Player Launch
     const angleRad = (currentLaunchAngle.value * Math.PI) / 180;
-    const maxSpeed = 200;
+
+    // Use player stats for speed
+    const launchSpeed = player.stats ? player.stats.spd : 200;
 
     // Matter.js velocity
-    const vx = Math.cos(angleRad) * maxSpeed * 0.1;
-    const vy = Math.sin(angleRad) * maxSpeed * 0.1;
+    const vx = Math.cos(angleRad) * launchSpeed * 0.1;
+    const vy = Math.sin(angleRad) * launchSpeed * 0.1;
 
     Body.setVelocity(player.body, { x: vx, y: vy });
 
@@ -1022,8 +1218,9 @@ launchBtn.addEventListener('click', () => {
 
     // Enemy Launch (Random Angle, Max Power)
     const enemyAngle = Math.random() * Math.PI * 2;
-    const enemyVx = Math.cos(enemyAngle) * maxSpeed * 0.1;
-    const enemyVy = Math.sin(enemyAngle) * maxSpeed * 0.1;
+    const enemySpeed = enemy.stats ? enemy.stats.spd : 200;
+    const enemyVx = Math.cos(enemyAngle) * enemySpeed * 0.1;
+    const enemyVy = Math.sin(enemyAngle) * enemySpeed * 0.1;
 
     Body.setVelocity(enemy.body, { x: enemyVx, y: enemyVy });
 
@@ -1048,9 +1245,88 @@ window.addEventListener('resize', () => {
     renderer.setPixelRatio(window.devicePixelRatio);
 });
 
-// Reset
+// Game Over / Winner UI
+function showWinner(text: string) {
+    const overlay = document.createElement('div');
+    overlay.className = 'winner-overlay';
+
+    const title = document.createElement('div');
+    title.className = 'winner-title';
+    title.innerText = text;
+    overlay.appendChild(title);
+
+    const rematchBtn = document.createElement('button');
+    rematchBtn.className = 'rematch-btn';
+    rematchBtn.innerText = 'REMATCH';
+    rematchBtn.onclick = () => {
+        document.body.removeChild(overlay);
+        resetMatch();
+    };
+    overlay.appendChild(rematchBtn);
+
+    document.body.appendChild(overlay);
+}
+
+function resetMatch() {
+    hasLaunched = false;
+    gameOver = false;
+    resetHint.style.display = 'none';
+
+    // Clear Sparks
+    sparks.forEach(s => scene.remove(s.mesh));
+    sparks.length = 0;
+
+    // Reset Entities
+    // Player
+    Body.setPosition(player.body, { x: 0, y: 100 });
+    Body.setVelocity(player.body, { x: 0, y: 0 });
+    Body.setAngularVelocity(player.body, 0);
+    Body.setAngle(player.body, 0); // Reset angle
+
+    player.mesh.position.set(0, getArenaHeight(0, 100) + 10, 100);
+    player.mesh.quaternion.set(0, 0, 0, 1); // Reset orientation
+    player.tiltGroup.rotation.set(0, 0, 0);
+    player.spinGroup.rotation.set(0, 0, 0);
+
+    player.trail.clear(); // Reset trajectory
+
+    player.isDead = false;
+    player.currentRpm = 0;
+
+    // Enemy
+    Body.setPosition(enemy.body, { x: 0, y: -100 });
+    Body.setVelocity(enemy.body, { x: 0, y: 0 });
+    Body.setAngularVelocity(enemy.body, 0);
+    Body.setAngle(enemy.body, 0); // Reset angle
+
+    enemy.mesh.position.set(0, getArenaHeight(0, -100) + 10, -100);
+    enemy.mesh.quaternion.set(0, 0, 0, 1); // Reset orientation
+    enemy.tiltGroup.rotation.set(0, 0, 0);
+    enemy.spinGroup.rotation.set(0, 0, 0);
+
+    enemy.trail.clear(); // Reset trajectory
+
+    enemy.isDead = false;
+    enemy.currentRpm = 0;
+
+    // Ensure bodies are in world (in case they were removed by death)
+    Composite.remove(engine.world, player.body); // Safe remove first
+    Composite.remove(engine.world, enemy.body);
+    Composite.add(engine.world, [player.body, enemy.body]);
+
+    // Show UI
+    launchContainer.style.display = 'flex';
+    updateGuide(currentLaunchAngle.value);
+    guideMesh.visible = true;
+}
+
+// Reset Key
 window.addEventListener('keydown', (e) => {
     if (e.key === 'r' || e.key === 'R') {
-        window.location.reload();
+        const overlay = document.querySelector('.winner-overlay');
+        if (overlay && overlay.parentNode) {
+            overlay.parentNode.removeChild(overlay);
+        }
+        resetMatch();
     }
 });

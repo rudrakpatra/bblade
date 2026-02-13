@@ -182,16 +182,19 @@ meter::-moz-meter-bar {
 /* --- Drag Zone (Pointer Lock) --- */
 .drag-zone {
   width: 300px;
-  height: 40px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  text-align: center;
   border: var(--border-width) solid var(--border-color);
   margin: 10px 0;
   cursor: crosshair;
   position: relative;
+  box-shadow: 4px 4px 0px var(--border-color);
 }
 
 .drag-zone:hover {
-  transform: translate(-2px, -2px);
-  box-shadow: 4px 4px 0px var(--primary-color);
+  box-shadow: 6px 6px 0px var(--primary-color);
 }
 
 .drag-zone:active,
@@ -216,7 +219,6 @@ meter::-moz-meter-bar {
   font-weight: bold;
   font-size: 1.2em;
   pointer-events: none;
-  animation: pulse 1.5s infinite;
 }
 
 .drag-zone::before {
@@ -229,45 +231,36 @@ meter::-moz-meter-bar {
   right: 10px;
 }
 
-@keyframes pulse {
-  0% {
-    opacity: 0.5;
-  }
-
-  50% {
-    opacity: 1;
-  }
-
-  100% {
-    opacity: 0.5;
-  }
-}
-
 /* --- Launch Button --- */
-.launch-btn {
-  padding: 10px 40px;
-  font-size: 1.5em;
+/* --- Base Button Styles --- */
+button {
   font-family: var(--font-stack);
   font-weight: bold;
-  color: var(--bg-color);
-  background: var(--text-color);
-  border: 4px solid var(--bg-color);
-  outline: 2px solid var(--text-color);
-  border-radius: 0;
-  cursor: pointer;
   text-transform: uppercase;
-  /* Removed transition for snappy feel */
+  cursor: pointer;
+  background: var(--bg-color);
+  color: var(--text-color);
+  border: var(--border-width) solid var(--border-color);
+  box-shadow: 4px 4px 0px var(--border-color);
+  padding: 8px 16px;
+  /* Compact padding */
+  font-size: 0.9em;
+  /* Compact font size */
+  pointer-events: auto;
+  position: relative;
 }
 
-.launch-btn:hover {
-  transform: translate(-2px, -2px);
-  box-shadow: 4px 4px 0px var(--primary-color);
+button:hover {
+  box-shadow: 6px 6px 0px var(--primary-color);
+  background: var(--text-color);
+  color: var(--bg-color);
 }
 
-.launch-btn:active {
+button:active {
   transform: translate(2px, 2px);
   box-shadow: none;
 }
+
 
 /* --- Responsive Design --- */
 @media (max-width: 600px) {
@@ -316,4 +309,226 @@ meter::-moz-meter-bar {
   font-size: 0.9em;
   pointer-events: none;
   display: none;
+}
+
+/* --- Launch Button Styles */
+.launch-btn {
+  padding: 10px 20px;
+  font-size: 1.2em;
+  letter-spacing: 1px;
+  z-index: 100;
+  /* Inherits base button styles */
+}
+
+/* --- Presets Editor Styles --- */
+.presets-btn {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  padding: 10px 20px;
+  font-size: 0.9em;
+  letter-spacing: 1px;
+  z-index: 100;
+  /* Inherits base button styles */
+}
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.8);
+  z-index: 2000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  pointer-events: auto;
+}
+
+.modal-content {
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  padding: 20px;
+  width: 90%;
+  max-width: 600px;
+  max-height: 90vh;
+  overflow-y: auto;
+  font-family: var(--font-stack);
+  color: var(--text-color);
+  box-shadow: 0 0 20px rgba(0, 0, 0, 0.8);
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 10px;
+}
+
+.modal-title {
+  font-size: 1.2em;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  font-size: 1.5em;
+  color: var(--text-color);
+  width: auto;
+  height: auto;
+}
+
+.modal-close:hover {
+  background: none;
+  color: var(--primary-color);
+  box-shadow: none;
+  transform: none;
+}
+
+.stat-section {
+  margin-bottom: 20px;
+}
+
+.section-title {
+  font-size: 1em;
+  font-weight: bold;
+  margin-bottom: 15px;
+  border-bottom: 1px solid #444;
+  padding-bottom: 5px;
+  color: #ccc;
+  text-transform: uppercase;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 15px;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-label {
+  font-size: 0.8em;
+  margin-bottom: 5px;
+  color: #aaa;
+  font-weight: bold;
+}
+
+.stat-input {
+  background: #111;
+  border: 1px solid #444;
+  color: var(--text-color);
+  padding: 8px;
+  font-family: var(--font-stack);
+  font-size: 0.9em;
+}
+
+.stat-input:focus {
+  border-color: var(--primary-color);
+  outline: none;
+}
+
+.stat-hint {
+  font-size: 0.7em;
+  color: #666;
+  margin-top: 4px;
+  font-style: italic;
+}
+
+.preset-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+  border-top: 1px solid var(--border-color);
+  padding-top: 15px;
+}
+
+.action-btn {
+  /* Inherits base button styles */
+  font-size: 1em;
+  width: auto;
+}
+
+/* 
+.action-btn.save {
+
+  background: var(--text-color);
+  color: var(--bg-color);
+}
+
+.action-btn.save:hover {
+  background: #ccc;
+  color: var(--bg-color);
+} */
+
+
+.action-btn.reset {
+  border: none;
+  box-shadow: none;
+  color: var(--text-color);
+}
+
+.action-btn.reset:hover {
+  border: none;
+  box-shadow: none;
+  background: none;
+  color: var(--primary-color);
+}
+
+/* --- Winner Overlay --- */
+.winner-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  z-index: 2000;
+}
+
+.winner-title {
+  font-size: 4em;
+  font-weight: 900;
+  color: var(--text-color);
+  text-transform: uppercase;
+  letter-spacing: 5px;
+  text-shadow: 4px 4px 0px var(--bg-color);
+  margin-bottom: 30px;
+  text-align: center;
+}
+
+.rematch-btn {
+  /* Inherit launch btn style for prominence */
+  padding: 15px 40px;
+  font-size: 1.5em;
+  border: 4px solid var(--bg-color);
+  outline: 2px solid var(--text-color);
+  background: var(--text-color);
+  color: var(--bg-color);
+  cursor: pointer;
+  text-transform: uppercase;
+  font-weight: bold;
+}
+
+.rematch-btn:hover {
+  background: var(--bg-color);
+  color: var(--text-color);
+  box-shadow: 6px 6px 0px var(--primary-color);
+  outline-color: var(--primary-color);
 }
