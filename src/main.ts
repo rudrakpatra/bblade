@@ -338,16 +338,9 @@ wallMesh.position.y = BOWL_MAX_HEIGHT;
 arenaGroup.add(wallMesh);
 
 
-// --- Beyblade Setup ---
-interface GameEntity {
-    body: Matter.Body;
-    mesh: THREE.Group; // Main container
-    tiltGroup: THREE.Group; // Inner container for tilt
-    spinGroup: THREE.Group; // Innermost for spin
-    trail: TrailSystem;
-}
 
-const entities: GameEntity[] = [];
+
+
 
 // Helper to create Beyblade 3D Model
 function createBeybladeMesh(color: number): { mesh: THREE.Group, tiltGroup: THREE.Group, spinGroup: THREE.Group } {
@@ -451,15 +444,68 @@ class TrailSystem {
         positionAttribute.needsUpdate = true;
     }
 }
+// --- Game Logic ---
+interface BeybladeStats {
+    maxRpm: number; // HP
+    atk: number;    // Damage dealt
+    def: number;    // Damage mitigation
+    wt: number;     // Mass
+    sta: number;    // RPM loss per second
+    spd: number;    // Launch speed factor
+    spl: number;    // Special charges (TBD)
+    crt: number;    // Critical hit chance (0.0 - 1.0)
+}
+
+interface GameEntity {
+    body: Matter.Body;
+    mesh: THREE.Object3D;
+    tiltGroup: THREE.Group;
+    spinGroup: THREE.Group;
+    trail: TrailSystem;
+    stats?: BeybladeStats;
+    currentRpm?: number;
+    // Death State
+    isDead?: boolean;
+    driftVelocity?: THREE.Vector3;
+    driftRotation?: THREE.Vector3;
+}
+const entities: GameEntity[] = [];
+
+// Stats Presets
+const PLAYER_STATS: BeybladeStats = {
+    maxRpm: 1000,
+    atk: 90,
+    def: 50,
+    wt: 1.0,  // Standard weight
+    sta: 10,  // Reduced decay to match lower RPM scale? Or keep 50? 
+    // 50 decay on 1000 is 20s life. 50 on 5000 was 100s. 
+    // Let's lower STA slightly so they don't die too fast.
+    spd: 1.0,
+    spl: 0,
+    crt: 0.2  // 20% Crit Chance
+};
+
+const ENEMY_STATS: BeybladeStats = {
+    maxRpm: 1000,
+    atk: 80,
+    def: 50,
+    wt: 0.2,
+    sta: 15,
+    spd: 0.8,
+    spl: 0,
+    crt: 0.1
+};
 
 
-function createBeyblade(x: number, y: number, color: number): GameEntity {
-    // Physics Body
+function createBeyblade(x: number, y: number, color: number, stats: BeybladeStats): GameEntity {
+    // Physics Body - Mass derived from stats.wt
+    const density = 0.05 * stats.wt; // Base density * weight multiplier
+
     const body = Bodies.circle(x, y, BEYBLADE_RADIUS, {
-        restitution: 0.9,
-        friction: 0.02,
-        frictionAir: 0.01,
-        density: 0.05,
+        restitution: 0.1,
+        friction: 0.2,
+        frictionAir: 0.005, // Lower air friction, we handle STA manually
+        density: density,
         label: 'Beyblade'
     });
 
@@ -472,14 +518,24 @@ function createBeyblade(x: number, y: number, color: number): GameEntity {
 
     // Initial Spawn
     Composite.add(engine.world, body);
-    entities.push({ body, mesh, tiltGroup, spinGroup, trail });
 
-    return { body, mesh, tiltGroup, spinGroup, trail };
+    const entity: GameEntity = {
+        body,
+        mesh,
+        tiltGroup,
+        spinGroup,
+        trail,
+        stats,
+        currentRpm: 0
+    };
+    entities.push(entity);
+
+    return entity;
 }
 
-// Create Player and Enemy - Positioned relative to 0,0
-const player = createBeyblade(0, 100, 0x9966ff);
-const enemy = createBeyblade(0, -100, 0xff6622);
+// Create Player and Enemy
+const player = createBeyblade(0, 100, 0x9966ff, PLAYER_STATS);
+const enemy = createBeyblade(0, -100, 0xff6622, ENEMY_STATS);
 
 // Initial Guide Update
 updateGuide(0);
@@ -517,9 +573,11 @@ hudTopBar.innerHTML = `
     <div class="hud-group">
         <span class="rpm-label">P1</span>
         <span id="player-rpm" class="rpm-text">0</span>
+        <meter id="player-meter" min="0" max="1000" low="200" high="800" optimum="1000" value="0"></meter>
     </div>
     <div class="hud-divider">VS</div>
     <div class="hud-group">
+        <meter id="enemy-meter" min="0" max="1000" low="200" high="800" optimum="1000" value="0" style="transform: scaleX(-1);"></meter>
         <span id="enemy-rpm" class="rpm-text">0</span>
         <span class="rpm-label">CPU</span>
     </div>
@@ -547,26 +605,29 @@ interface Spark {
     life: number;
 }
 const sparks: Spark[] = [];
-const sparkGeometry = new THREE.BoxGeometry(2, 2, 2);
-const sparkMaterial = new THREE.MeshBasicMaterial({ color: 0xffcc00 });
+const sparkGeo = new THREE.BoxGeometry(3, 3, 3); // Bigger sparks
 
-function createSparks(x: number, y: number, count: number) {
-    for (let i = 0; i < count; i++) {
-        const mesh = new THREE.Mesh(sparkGeometry, sparkMaterial.clone());
-        mesh.position.set(x, 5, y); // z is y in 2D physics mapping
-        scene.add(mesh);
+function createSpark(x: number, y: number, color: number, speedVal: number) {
+    const material = new THREE.MeshBasicMaterial({
+        color: color,
+        // side: THREE.DoubleSide, // Not needed for Box
+        transparent: true
+    });
+    const mesh = new THREE.Mesh(sparkGeo, material);
 
-        const speed = 2 + Math.random() * 5 * 2;
-        const angle = Math.random() * Math.PI * 2;
-        // Spread in 3D? Mostly horizontal
-        const velocity = new THREE.Vector3(
-            Math.cos(angle) * speed,
-            Math.random() * 5, // Some upward pop
-            Math.sin(angle) * speed
-        );
+    mesh.position.set(x, getArenaHeight(x, y) + 5, y);
 
-        sparks.push({ mesh, velocity, life: 1.0 });
-    }
+    scene.add(mesh);
+
+    const angle = Math.random() * Math.PI * 2;
+
+    const velocity = new THREE.Vector3(
+        Math.cos(angle) * speedVal,
+        Math.random() * speedVal, // jump up
+        Math.sin(angle) * speedVal
+    );
+
+    sparks.push({ mesh, velocity, life: 1.0 });
 }
 
 // --- Audio System (Keep same) ---
@@ -635,24 +696,55 @@ function playCollisionSound(intensity: number) {
 }
 
 Events.on(engine, 'collisionStart', (event) => {
-    const pairs = event.pairs;
-    for (let i = 0; i < pairs.length; i++) {
-        const pair = pairs[i];
+    event.pairs.forEach((pair) => {
+        const entityA = entities.find(e => e.body === pair.bodyA);
+        const entityB = entities.find(e => e.body === pair.bodyB);
 
-        // Approximate collision point (Matter coords)
-        const supports = pair.collision.supports;
-        let x = 0, y = 0;
-        if (supports.length > 0) {
-            x = supports[0].x;
-            y = supports[0].y;
+        // Stats-Based Combat
+        if (entityA && entityB && entityA.stats && entityB.stats) {
+
+            // A hits B
+            const critA = Math.random() < entityA.stats.crt;
+            const rawDmgA = critA ? entityA.stats.atk * 2 : entityA.stats.atk;
+            const dmgA = Math.max(0, rawDmgA - entityB.stats.def);
+            if (entityB.currentRpm !== undefined) {
+                entityB.currentRpm = Math.max(0, entityB.currentRpm - dmgA);
+            }
+
+            // B hits A
+            const critB = Math.random() < entityB.stats.crt;
+            const rawDmgB = critB ? entityB.stats.atk * 2 : entityB.stats.atk;
+            const dmgB = Math.max(0, rawDmgB - entityA.stats.def);
+            if (entityA.currentRpm !== undefined) {
+                entityA.currentRpm = Math.max(0, entityA.currentRpm - dmgB);
+            }
+
+            // Sparks - Color based on Crit
+            const isCrit = critA || critB;
+            const sparkColor = isCrit ? 0xffffff : 0xffaa00;
+            const count = isCrit ? 15 : 5;
+            const speed = isCrit ? 5 : 2;
+
+            if (pair.collision.supports.length > 0) {
+                const { x, y } = pair.collision.supports[0];
+                for (let i = 0; i < count; i++) {
+                    createSpark(x, y, sparkColor, speed);
+                }
+            }
+
+            playCollisionSound(0.5);
+
         } else {
-            x = (pair.bodyA.position.x + pair.bodyB.position.x) / 2;
-            y = (pair.bodyA.position.y + pair.bodyB.position.y) / 2;
+            // Fallback / Wall hits
+            if (pair.collision.supports.length > 0) {
+                const { x, y } = pair.collision.supports[0];
+                for (let i = 0; i < 5; i++) {
+                    createSpark(x, y, 0xffaa00, 2);
+                }
+            }
+            playCollisionSound(0.3);
         }
-
-        createSparks(x, y, 8);
-        playCollisionSound(0.5);
-    }
+    });
 });
 
 
@@ -670,6 +762,8 @@ function animate() {
 
         if (hasLaunched) {
             entities.forEach(entity => {
+                if (entity.isDead) return; // Skip physics forces for dead entities
+
                 // Dish Effect: Push towards center (0,0)
                 const dx = 0 - entity.body.position.x;
                 const dy = 0 - entity.body.position.y;
@@ -684,6 +778,83 @@ function animate() {
 
     // Update Visuals
     entities.forEach(entity => {
+
+        // --- Death Logic Check ---
+
+        if (!entity.isDead && entity.currentRpm !== undefined && hasLaunched) {
+            const pos = entity.mesh.position;
+            // Ring Out Check
+            const dist = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
+            const RING_OUT_RADIUS = 350; // Arena is 300
+
+            if (entity.currentRpm <= 0 || dist > RING_OUT_RADIUS) {
+                // Trigger Death
+                entity.isDead = true;
+                entity.currentRpm = 0;
+
+                // Capture last velocity before removing body
+                const vx = entity.body.velocity.x;
+                const vz = entity.body.velocity.y; // Matter Y is Three Z
+
+                // Calculate Vertical Velocity based on Slope (Tangent)
+                // H = k * r^2
+                // k = MAX_H / R^2
+                // vy = dH/dt = dH/dx * vx + dH/dz * vz
+                const k = BOWL_MAX_HEIGHT / (ARENA_RADIUS * ARENA_RADIUS);
+                const vy = (2 * k * pos.x * vx) + (2 * k * pos.z * vz);
+
+                const speed = Math.sqrt(vx * vx + vz * vz);
+
+                let driftV = new THREE.Vector3(vx, vy, vz);
+
+                if (speed < 0.5) {
+                    // If it died standing still (Stamina 0), give it a gentle float
+                    driftV = new THREE.Vector3(
+                        (Math.random() - 0.5) * 0.5,
+                        0.5, // Slow float up
+                        (Math.random() - 0.5) * 0.5
+                    );
+                } else {
+                    // Conserve momentum.
+                    // Scale slightly to make the "breakaway" feel impactful
+                    driftV.multiplyScalar(1.2);
+                    driftV.y += 0.5; // Slight lift to simulate "loss of gravity/grip"
+                }
+
+                // Ensure it flies UP (Positive Y)
+                if (driftV.y < 0) {
+                    driftV.y = -driftV.y;
+                }
+                // Minimum lift to clear the floor
+                driftV.y = Math.max(driftV.y, 0.5);
+
+                entity.driftVelocity = driftV;
+
+                entity.driftRotation = new THREE.Vector3(
+                    Math.random() * 0.2 - 0.1,
+                    Math.random() * 0.2 - 0.1,
+                    Math.random() * 0.2 - 0.1
+                );
+
+                // Remove from Physics World
+                Composite.remove(engine.world, entity.body);
+            }
+        }
+
+        // --- Visual Update ---
+        if (entity.isDead) {
+            // Asteroid Mode
+            if (entity.driftVelocity && entity.driftRotation) {
+                entity.mesh.position.add(entity.driftVelocity);
+                entity.mesh.rotation.x += entity.driftRotation.x;
+                entity.mesh.rotation.y += entity.driftRotation.y;
+                entity.mesh.rotation.z += entity.driftRotation.z;
+
+                // Slight fade? Or just fly away.
+            }
+            return; // Skip normal sync
+        }
+
         // Sync position: Matter (x, y) -> Three (x, z).
         const x = entity.body.position.x;
         const z = entity.body.position.y;
@@ -722,6 +893,27 @@ function animate() {
 
         // Update Trail - Lift slightly above surface
         entity.trail.update(x, y + 2, z);
+
+        // --- RPG Stats Logic ---
+        if (entity.stats && entity.currentRpm !== undefined) {
+            // Stamina Decay
+            // Lose STA per second
+            const decay = entity.stats.sta * (subStepDelta / 1000) * SUBSTEPS;
+            if (entity.currentRpm > 0) {
+                entity.currentRpm = Math.max(0, entity.currentRpm - decay);
+            }
+
+            // Force Physics to match RPM Health
+            // RPM to Angular Velocity (rad/s) approx factor
+            // 100 RPM ~= 1 rad/s (simplified for game feel)
+            const targetAngularVelocity = entity.currentRpm / 100;
+
+            // Direction varies? For now assume positive/counter-clockwise.
+            // If it was spinning, keep sign. If 0, no spin.
+            const sign = Math.sign(entity.body.angularVelocity) || 1;
+
+            Body.setAngularVelocity(entity.body, targetAngularVelocity * sign);
+        }
     });
 
     // Update Sparks
@@ -761,8 +953,10 @@ function animate() {
     // UI Updates
     frameCounter++;
     if (frameCounter % 10 === 0) {
-        const playerRpm = Math.round(Math.abs(player.body.angularVelocity) * 100);
-        const enemyRpm = Math.round(Math.abs(enemy.body.angularVelocity) * 100);
+        // Use Stats RPM as source of truth, fallback to physics if undefined (e.g. pre-launch)
+        // If dead, force 0.
+        const playerRpm = player.isDead ? 0 : Math.round(player.currentRpm || 0);
+        const enemyRpm = enemy.isDead ? 0 : Math.round(enemy.currentRpm || 0);
 
         if (playerRpmEl && playerRpmEl.innerText !== playerRpm.toString()) {
             playerRpmEl.innerText = playerRpm.toString();
@@ -809,13 +1003,22 @@ launchBtn.addEventListener('click', () => {
 
     // Player Launch
     const angleRad = (currentLaunchAngle.value * Math.PI) / 180;
-    const maxSpeed = 200; // Force magnitude roughly
+    const maxSpeed = 200;
+
     // Matter.js velocity
     const vx = Math.cos(angleRad) * maxSpeed * 0.1;
-    const vy = Math.sin(angleRad) * maxSpeed * 0.1; // Z in 3D is Y in Matter
+    const vy = Math.sin(angleRad) * maxSpeed * 0.1;
 
     Body.setVelocity(player.body, { x: vx, y: vy });
-    Body.setAngularVelocity(player.body, 10.0);
+
+    // Initialize Player HP (RPM)
+    if (player.stats) {
+        player.currentRpm = player.stats.maxRpm;
+        // visual spin speed (rad/s approx rpm/100)
+        Body.setAngularVelocity(player.body, player.currentRpm / 100);
+    } else {
+        Body.setAngularVelocity(player.body, 50); // Fallback
+    }
 
     // Enemy Launch (Random Angle, Max Power)
     const enemyAngle = Math.random() * Math.PI * 2;
@@ -823,7 +1026,14 @@ launchBtn.addEventListener('click', () => {
     const enemyVy = Math.sin(enemyAngle) * maxSpeed * 0.1;
 
     Body.setVelocity(enemy.body, { x: enemyVx, y: enemyVy });
-    Body.setAngularVelocity(enemy.body, 10.0);
+
+    // Initialize Enemy HP (RPM)
+    if (enemy.stats) {
+        enemy.currentRpm = enemy.stats.maxRpm;
+        Body.setAngularVelocity(enemy.body, enemy.currentRpm / 100);
+    } else {
+        Body.setAngularVelocity(enemy.body, 50);
+    }
 
     // Hide UI handled in animate loop or here
     launchContainer.style.display = 'none';
