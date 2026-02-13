@@ -1,6 +1,9 @@
+
 import Matter from 'matter-js';
 import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import "./style.css";
+// import "./CircularRange"; // Import the web component
 
 // --- Physics Setup (Matter.js) ---
 const Engine = Matter.Engine;
@@ -13,6 +16,9 @@ const engine = Engine.create();
 // Disable global gravity (top-down view)
 engine.gravity.y = 0;
 engine.gravity.scale = 0;
+const clock = new THREE.Clock();
+
+
 
 // Increase solver iterations for stability with high speed collisions
 engine.positionIterations = 16;
@@ -28,9 +34,212 @@ camera.position.set(0, 600, 400);
 camera.lookAt(0, 0, 0);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio); // Fix pixelation
+renderer.autoClear = false; // We will clear manually for gizmo overlay
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
+
+// --- Orbit Controls ---
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = false;
+controls.maxPolarAngle = Math.PI / 2 - 0.1; // Keep floor constraint
+
+// --- Launch UI (Slider + Button)
+const launchContainer = document.createElement('div');
+launchContainer.id = 'launch-container';
+document.body.appendChild(launchContainer);
+
+
+const currentLaunchAngle = { value: 0 };
+
+// -- Linear Slider --
+// -- Pointer Lock Drag Zone --
+const dragZone = document.createElement('div');
+dragZone.className = 'drag-zone';
+dragZone.title = "Click to Lock & Drag";
+launchContainer.appendChild(dragZone);
+
+// Stop propagation to prevent camera orbit when clicking slider
+// Pointer Lock logic
+// Pointer Lock logic: Press to Lock, Release to Unlock
+dragZone.addEventListener('pointerdown', () => {
+    dragZone.requestPointerLock();
+    dragZone.classList.add('active');
+});
+
+document.addEventListener('pointerup', () => {
+    if (document.pointerLockElement === dragZone) {
+        document.exitPointerLock();
+        dragZone.classList.remove('active');
+    }
+});
+
+document.addEventListener('mousemove', (e) => {
+    if (document.pointerLockElement === dragZone) {
+        const sensitivity = 0.5;
+        let newAngle = currentLaunchAngle.value + e.movementX * sensitivity;
+
+        // Wrap angle 0-360
+        if (newAngle >= 360) newAngle -= 360;
+        if (newAngle < 0) newAngle += 360;
+
+        currentLaunchAngle.value = newAngle;
+
+        // Update Guide & Visuals
+        updateGuide(currentLaunchAngle.value);
+    }
+});
+
+
+
+// Launch Button
+const launchBtn = document.createElement('button');
+launchBtn.textContent = 'GO!';
+launchBtn.className = 'launch-btn';
+launchContainer.appendChild(launchBtn);
+
+
+// move the width segment point to make it a chevron
+const arrowVertexShader = `
+varying vec2 vUv;
+void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const arrowFragmentShader = `
+uniform float uTime;
+varying vec2 vUv;
+
+void main() {
+    float phase = vUv.x * 6.0 - uTime * 2.0;
+    float alpha = fract(phase);
+    if (alpha > 0.2) discard;
+    gl_FragColor = vec4(vec3(.6), 1);
+}
+`;
+
+const arrowGeo = new THREE.PlaneGeometry();
+
+const arrowMat = new THREE.ShaderMaterial({
+    vertexShader: arrowVertexShader,
+    fragmentShader: arrowFragmentShader,
+    uniforms: {
+        uTime: { value: 0 }
+    },
+    transparent: true,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending
+});
+
+
+const arrowMesh = new THREE.Mesh(arrowGeo, arrowMat);
+scene.add(arrowMesh);
+
+// Helper to update arrow mesh to hug ground
+
+
+// Replace geometry with custom buffer for easier control
+// Replace geometry with custom buffer for easier control
+const guideGeo = new THREE.BufferGeometry();
+const guideSegs = 20;
+// 3 points per step (Left, Center, Right)
+const guidePositions = new Float32Array((guideSegs + 1) * 3 * 3);
+const guideUvs = new Float32Array((guideSegs + 1) * 3 * 2);
+const guideIndices = [];
+
+for (let i = 0; i < guideSegs; i++) {
+    // 3 points per row: 0:Left, 1:Center, 2:Right
+    const base = 3 * i;
+    const next = 3 * (i + 1);
+
+    // Quad 1: Left-Center
+    // L, L', C
+    guideIndices.push(base, next, base + 1);
+    // C, L', C'
+    guideIndices.push(base + 1, next, next + 1);
+
+    // Quad 2: Center-Right
+    // C, C', R
+    guideIndices.push(base + 1, next + 1, base + 2);
+    // R, C', R'
+    guideIndices.push(base + 2, next + 1, next + 2);
+}
+
+guideGeo.setIndex(guideIndices);
+guideGeo.setAttribute('position', new THREE.BufferAttribute(guidePositions, 3));
+guideGeo.setAttribute('uv', new THREE.BufferAttribute(guideUvs, 2));
+
+const guideMesh = new THREE.Mesh(guideGeo, arrowMat);
+guideMesh.frustumCulled = false; // Always render
+scene.add(guideMesh);
+scene.remove(arrowMesh); // Remove the temp plane one
+
+function updateGuide(angleDeg: number) {
+    if (!player) return;
+
+    const angleRad = (angleDeg * Math.PI) / 180;
+    const dirX = Math.cos(angleRad);
+    const dirZ = Math.sin(angleRad);
+    const perpX = -dirZ;
+    const perpZ = dirX;
+
+    const len = 80;
+    const width = 15; // Slightly wider for chevron
+    const chevronOffset = 5; // How much the center sticks out
+
+    const posAttr = guideGeo.attributes.position;
+    const uvAttr = guideGeo.attributes.uv;
+
+    const startX = player.mesh.position.x;
+    const startZ = player.mesh.position.z;
+
+    for (let i = 0; i <= guideSegs; i++) {
+        const t = i / guideSegs;
+        const dist = t * len;
+
+        // Base center point on the line
+        const bx = startX + dirX * dist;
+        const bz = startZ + dirZ * dist;
+
+        // Center Point (Pushed forward for V-shape)
+        // Actually, "V" usually points forward. So center is LEADING.
+        // If center is at 'dist + offset', edges are at 'dist'.
+        // BUT, visually a chevron usually looks like this: >
+        // So center is further along X than edges.
+        const cx = bx + dirX * chevronOffset;
+        const cz = bz + dirZ * chevronOffset;
+        const cy = getArenaHeight(cx, cz) + 2;
+
+        // Left Point (Edges trail behind center)
+        const lx = bx + perpX * width * 0.5;
+        const lz = bz + perpZ * width * 0.5;
+        const ly = getArenaHeight(lx, lz) + 2;
+
+        // Right Point
+        const rx = bx - perpX * width * 0.5;
+        const rz = bz - perpZ * width * 0.5;
+        const ry = getArenaHeight(rx, rz) + 2;
+
+        // Indices: 3*i, 3*i+1, 3*i+2
+        posAttr.setXYZ(3 * i, lx, ly, lz);     // Left
+        posAttr.setXYZ(3 * i + 1, cx, cy, cz); // Center
+        posAttr.setXYZ(3 * i + 2, rx, ry, rz); // Right
+
+        // UVs
+        // Center V=0.5, Left V=0, Right V=1
+        uvAttr.setXY(3 * i, t, 0);
+        uvAttr.setXY(3 * i + 1, t, 0.5);
+        uvAttr.setXY(3 * i + 2, t, 1);
+    }
+
+    posAttr.needsUpdate = true;
+    uvAttr.needsUpdate = true;
+}
+
+
 
 // Lights
 const ambientLight = new THREE.AmbientLight(0x404040, 2); // Soft white light
@@ -51,7 +260,7 @@ const DISH_FORCE = 0.00002;
 
 // Helper function for Bowl Shape
 // y = (r / R)^2 * MaxH
-const BOWL_MAX_HEIGHT = 100;
+const BOWL_MAX_HEIGHT = 50;
 function getArenaHeight(x: number, z: number): number {
     const dist = Math.sqrt(x * x + z * z);
     // Clamp to radius
@@ -117,7 +326,6 @@ const floorMaterial = new THREE.MeshBasicMaterial({
     side: THREE.DoubleSide
 });
 const floor = new THREE.Mesh(floorGeometry, floorMaterial);
-floor.receiveShadow = true;
 arenaGroup.add(floor);
 
 
@@ -127,8 +335,6 @@ const wallMaterial = new THREE.MeshBasicMaterial({ color: 0x666666 });
 const wallMesh = new THREE.Mesh(wallGeometry, wallMaterial);
 wallMesh.rotation.x = Math.PI / 2;
 wallMesh.position.y = BOWL_MAX_HEIGHT;
-wallMesh.castShadow = true;
-wallMesh.receiveShadow = true;
 arenaGroup.add(wallMesh);
 
 
@@ -275,6 +481,12 @@ function createBeyblade(x: number, y: number, color: number): GameEntity {
 const player = createBeyblade(0, 100, 0x9966ff);
 const enemy = createBeyblade(0, -100, 0xff6622);
 
+// Initial Guide Update
+updateGuide(0);
+
+// Trigger once logic moved to setup
+
+
 // --- Interaction State ---
 let isDragging = false;
 let hasLaunched = false;
@@ -289,40 +501,41 @@ scene.add(dragLine);
 
 // --- UI Overlay (HTML - Keep mostly same) ---
 const uiContainer = document.createElement('div');
+uiContainer.style.position = 'absolute';
+uiContainer.style.top = '0';
+uiContainer.style.left = '0';
+uiContainer.style.width = '100%';
+uiContainer.style.height = '100%';
+uiContainer.style.pointerEvents = 'none'; // Let clicks pass through to canvas
+uiContainer.style.zIndex = '10';
 document.body.appendChild(uiContainer);
 
-// Player HUD
-const playerHud = document.createElement('div');
-playerHud.className = 'hud hud-left';
-playerHud.innerHTML = `
-    <div class="bey-icon" style="background-color: #9966ff; box-shadow: 0 0 10px #9966ff; color: white;">P</div>
-    <div>
+// Consolidated Top Bar HUD
+const hudTopBar = document.createElement('div');
+hudTopBar.id = 'hud-top-bar';
+hudTopBar.innerHTML = `
+    <div class="hud-group">
+        <span class="rpm-label">P1</span>
         <span id="player-rpm" class="rpm-text">0</span>
-        <span class="rpm-label">RPM</span>
     </div>
-`;
-uiContainer.appendChild(playerHud);
-
-// Enemy HUD
-const enemyHud = document.createElement('div');
-enemyHud.className = 'hud hud-right';
-enemyHud.innerHTML = `
-    <div class="bey-icon" style="background-color: #ff6622; box-shadow: 0 0 10px #ff6622; color: white;">E</div>
-    <div>
+    <div class="hud-divider">VS</div>
+    <div class="hud-group">
         <span id="enemy-rpm" class="rpm-text">0</span>
-        <span class="rpm-label">RPM</span>
+        <span class="rpm-label">CPU</span>
     </div>
 `;
-uiContainer.appendChild(enemyHud);
+uiContainer.appendChild(hudTopBar);
 
 // Reset Hint
 const resetHint = document.createElement('div');
 resetHint.className = 'reset-hint';
-resetHint.innerText = 'Drag to Launch | Press R to Reset';
+resetHint.innerText = 'Drag to Launch | R to Reset';
 uiContainer.appendChild(resetHint);
 
 const playerRpmEl = document.getElementById('player-rpm')!;
 const enemyRpmEl = document.getElementById('enemy-rpm')!;
+const playerMeterEl = document.getElementById('player-meter') as HTMLMeterElement;
+const enemyMeterEl = document.getElementById('enemy-meter') as HTMLMeterElement;
 
 
 // --- Spark System ---
@@ -551,130 +764,70 @@ function animate() {
         const playerRpm = Math.round(Math.abs(player.body.angularVelocity) * 100);
         const enemyRpm = Math.round(Math.abs(enemy.body.angularVelocity) * 100);
 
-        if (playerRpmEl) playerRpmEl.innerText = playerRpm.toString();
-        if (enemyRpmEl) enemyRpmEl.innerText = enemyRpm.toString();
+        if (playerRpmEl && playerRpmEl.innerText !== playerRpm.toString()) {
+            playerRpmEl.innerText = playerRpm.toString();
+        }
+        if (enemyRpmEl && enemyRpmEl.innerText !== enemyRpm.toString()) {
+            enemyRpmEl.innerText = enemyRpm.toString();
+        }
+
+        if (playerMeterEl && playerMeterEl.value !== playerRpm) {
+            playerMeterEl.value = playerRpm;
+        }
+        if (enemyMeterEl && enemyMeterEl.value !== enemyRpm) {
+            enemyMeterEl.value = enemyRpm;
+        }
+    }
+
+    // Update controls
+    controls.update();
+
+    if (!hasLaunched) {
+        const angle = currentLaunchAngle.value;
+        updateGuide(angle);
+        guideMesh.visible = true;
+        arrowMat.uniforms.uTime.value = clock.getElapsedTime();
+    } else {
+        guideMesh.visible = false;
+        launchContainer.style.display = 'none';
     }
 
     renderer.render(scene, camera);
+
+
 }
 animate();
 
 
-// --- Input Processing (Raycasting for 3D) ---
-const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
-const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // Ground plane
+// --- Input Processing ---
+// Removed Drag interaction for Launch. Using UI instead.
 
-function getIntersectPoint(clientX: number, clientY: number): THREE.Vector3 | null {
-    mouse.x = (clientX / window.innerWidth) * 2 - 1;
-    mouse.y = -(clientY / window.innerHeight) * 2 + 1;
-
-    raycaster.setFromCamera(mouse, camera);
-    const target = new THREE.Vector3();
-    const intersection = raycaster.ray.intersectPlane(plane, target);
-    return intersection;
-}
-
-document.addEventListener('mousedown', (e) => {
+launchBtn.addEventListener('click', () => {
     if (hasLaunched) return;
 
-    const point = getIntersectPoint(e.clientX, e.clientY);
-    if (!point) return;
+    hasLaunched = true;
 
-    // Check distance to player
-    const dist = Math.sqrt(
-        Math.pow(point.x - player.body.position.x, 2) +
-        Math.pow(point.z - player.body.position.y, 2)
-    );
+    // Player Launch
+    const angleRad = (currentLaunchAngle.value * Math.PI) / 180;
+    const maxSpeed = 200; // Force magnitude roughly
+    // Matter.js velocity
+    const vx = Math.cos(angleRad) * maxSpeed * 0.1;
+    const vy = Math.sin(angleRad) * maxSpeed * 0.1; // Z in 3D is Y in Matter
 
-    if (dist < BEYBLADE_RADIUS * 2) {
-        isDragging = true;
-        dragLine.visible = true;
-    }
-});
+    Body.setVelocity(player.body, { x: vx, y: vy });
+    Body.setAngularVelocity(player.body, 10.0);
 
-document.addEventListener('mousemove', (e) => {
-    if (isDragging) {
-        const point = getIntersectPoint(e.clientX, e.clientY);
-        if (point) {
-            const positions = dragLine.geometry.attributes.position.array as Float32Array;
-            // Set Start (Player)
-            const pHeight = getArenaHeight(player.body.position.x, player.body.position.y);
-            positions[0] = player.body.position.x;
-            positions[1] = pHeight + 5;
-            positions[2] = player.body.position.y;
+    // Enemy Launch (Random Angle, Max Power)
+    const enemyAngle = Math.random() * Math.PI * 2;
+    const enemyVx = Math.cos(enemyAngle) * maxSpeed * 0.1;
+    const enemyVy = Math.sin(enemyAngle) * maxSpeed * 0.1;
 
-            // Set End (Mouse)
-            // Limit line length
-            const maxLen = 200;
-            const dx = point.x - player.body.position.x;
-            const dy = point.z - player.body.position.y; // Z is Y in physics
-            const len = Math.sqrt(dx * dx + dy * dy);
+    Body.setVelocity(enemy.body, { x: enemyVx, y: enemyVy });
+    Body.setAngularVelocity(enemy.body, 10.0);
 
-            let targetX = point.x;
-            let targetZ = point.z;
-
-            if (len > maxLen) {
-                const angle = Math.atan2(dy, dx);
-                targetX = player.body.position.x + Math.cos(angle) * maxLen;
-                targetZ = player.body.position.y + Math.sin(angle) * maxLen;
-            }
-
-            positions[3] = targetX;
-            positions[4] = getArenaHeight(targetX, targetZ) + 5;
-            positions[5] = targetZ;
-
-            dragLine.geometry.attributes.position.needsUpdate = true;
-        }
-    }
-});
-
-document.addEventListener('mouseup', (e) => {
-    if (isDragging) {
-        isDragging = false;
-        hasLaunched = true;
-        dragLine.visible = false;
-        resetHint.style.display = 'none';
-
-        const point = getIntersectPoint(e.clientX, e.clientY);
-        if (!point) return; // Should likely use last known valid point or just current mouse projection
-
-        // Calculate launch vector
-        // Drag logic: Pull BACK to shoot FORWARD? Or Drag TOWARDS target? 
-        // Original was "Drag to launch" -> usually pull back like slingshot or drag in direction?
-        // Code said: dx = mouseX - playerX. Body.setVelocity(dx * 0.1).
-        // This means it shoots TOWARDS the mouse.
-
-        // Re-read current mouse pos from drag line end if needed, better to use event
-        let dx = point.x - player.body.position.x;
-        let dy = point.z - player.body.position.y;
-
-        const maxSpeed = 300;
-        const speed = Math.sqrt(dx * dx + dy * dy);
-
-        let launchDx = dx;
-        let launchDy = dy;
-
-        if (speed > maxSpeed) {
-            const scale = maxSpeed / speed;
-            launchDx = dx * scale;
-            launchDy = dy * scale;
-        }
-
-        Body.setVelocity(player.body, { x: launchDx * 0.1, y: launchDy * 0.1 });
-        Body.setAngularVelocity(player.body, 15.0);
-
-        // enemy launch
-        const randAngle = Math.random() * Math.PI * 2;
-        const enemyMaxSpeed = maxSpeed;
-        const randSpeedVal = 0.2 * enemyMaxSpeed + Math.random() * 0.8 * enemyMaxSpeed;
-
-        const enemyVx = Math.cos(randAngle) * randSpeedVal;
-        const enemyVy = Math.sin(randAngle) * randSpeedVal;
-
-        Body.setVelocity(enemy.body, { x: enemyVx * 0.1, y: enemyVy * 0.1 });
-        Body.setAngularVelocity(enemy.body, 15.0);
-    }
+    // Hide UI handled in animate loop or here
+    launchContainer.style.display = 'none';
+    resetHint.style.display = 'block'; // Show reset hint
 });
 
 // Window Resize Handling
@@ -682,6 +835,7 @@ window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
 });
 
 // Reset
