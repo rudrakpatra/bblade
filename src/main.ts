@@ -28,7 +28,17 @@ engine.velocityIterations = 16;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x222222);
 
-const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 2000);
+// Orthographic Camera Setup
+const aspect = window.innerWidth / window.innerHeight;
+const frustumSize = 600; // Controls zoom level (smaller = more zoomed in)
+const camera = new THREE.OrthographicCamera(
+    frustumSize * aspect / -2,  // left
+    frustumSize * aspect / 2,   // right
+    frustumSize / 2,            // top
+    frustumSize / -2,           // bottom
+    0.1,                        // near
+    2000                        // far
+);
 // Position camera for a slanted top-down view
 camera.position.set(0, 600, 400);
 camera.lookAt(0, 0, 0);
@@ -1484,8 +1494,15 @@ launchBtn.addEventListener('click', () => {
 
 // Window Resize Handling
 window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
+    const aspect = window.innerWidth / window.innerHeight;
+    const frustumSize = 600;
+
+    camera.left = frustumSize * aspect / -2;
+    camera.right = frustumSize * aspect / 2;
+    camera.top = frustumSize / 2;
+    camera.bottom = frustumSize / -2;
     camera.updateProjectionMatrix();
+
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
 });
