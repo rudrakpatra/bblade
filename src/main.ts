@@ -602,13 +602,13 @@ function loadPresets() {
     if (eData) Object.assign(ENEMY_STATS, JSON.parse(eData));
 }
 
-function resetPresets() {
-    localStorage.removeItem('bblade_player_stats');
-    localStorage.removeItem('bblade_enemy_stats');
-    Object.assign(PLAYER_STATS, DEFAULT_PLAYER_STATS);
-    Object.assign(ENEMY_STATS, DEFAULT_ENEMY_STATS);
-    console.log('Presets Reset to Defaults!');
-}
+// function resetPresets() {
+//     localStorage.removeItem('bblade_player_stats');
+//     localStorage.removeItem('bblade_enemy_stats');
+//     Object.assign(PLAYER_STATS, DEFAULT_PLAYER_STATS);
+//     Object.assign(ENEMY_STATS, DEFAULT_ENEMY_STATS);
+//     console.log('Presets Reset to Defaults!');
+// }
 
 // Load on Startup
 loadPresets();
@@ -920,20 +920,24 @@ function openPresetsModal(targetStats: BeybladeStats, targetName: string) {
     resetBtn.innerText = 'Reset Defaults';
     resetBtn.style.marginRight = 'auto';
     resetBtn.onclick = () => {
-        if (confirm(`Reset all ${targetName} stats to default?`)) {
-            // Reset specific target
-            if (targetName === 'Player') Object.assign(PLAYER_STATS, DEFAULT_PLAYER_STATS);
-            if (targetName === 'CPU') Object.assign(ENEMY_STATS, DEFAULT_ENEMY_STATS);
+        showConfirmDialog(
+            `Reset ${targetName} Beyblade?`,
+            `This will remove all customizations and restore default stats for ${targetName}. This action will clear saved data from local storage.`,
+            () => {
+                // Confirmed - Reset specific target
+                if (targetName === 'Player') Object.assign(PLAYER_STATS, DEFAULT_PLAYER_STATS);
+                if (targetName === 'CPU') Object.assign(ENEMY_STATS, DEFAULT_ENEMY_STATS);
 
-            // Re-open/refresh modal would be tricky recursively with new args, 
-            // easier to close and let user re-open, or just update UI?
-            // Let's close for simplicity to refresh state
-            uiContainer.removeChild(overlay);
-            if (previewRenderer) {
-                previewRenderer.dispose();
-                previewRenderer = null;
+                savePresets(); // Persist the reset
+
+                uiContainer.removeChild(overlay);
+                if (previewRenderer) {
+                    previewRenderer.dispose();
+                    previewRenderer = null;
+                }
+                resetMatch(); // Apply visual reset immediately
             }
-        }
+        );
     };
     actions.appendChild(resetBtn);
 
@@ -961,6 +965,51 @@ function openPresetsModal(targetStats: BeybladeStats, targetName: string) {
 // Remove old listener assignment if exists
 // presetsBtn.onclick = openPresetsModal; 
 
+
+// Custom Confirm Dialog
+function showConfirmDialog(title: string, message: string, onConfirm: () => void) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+
+    const content = document.createElement('div');
+    content.className = 'modal-content';
+    content.style.maxWidth = '400px';
+
+    const header = document.createElement('div');
+    header.className = 'modal-header';
+    header.innerHTML = `<span class="modal-title">${title}</span>`;
+    content.appendChild(header);
+
+    const messageDiv = document.createElement('div');
+    messageDiv.style.padding = '20px';
+    messageDiv.style.lineHeight = '1.5';
+    messageDiv.innerText = message;
+    content.appendChild(messageDiv);
+
+    const actions = document.createElement('div');
+    actions.className = 'preset-actions';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'action-btn';
+    cancelBtn.innerText = 'Cancel';
+    cancelBtn.onclick = () => {
+        uiContainer.removeChild(overlay);
+    };
+    actions.appendChild(cancelBtn);
+
+    const confirmBtn = document.createElement('button');
+    confirmBtn.className = 'action-btn save';
+    confirmBtn.innerText = 'Confirm Reset';
+    confirmBtn.onclick = () => {
+        uiContainer.removeChild(overlay);
+        onConfirm();
+    };
+    actions.appendChild(confirmBtn);
+
+    content.appendChild(actions);
+    overlay.appendChild(content);
+    uiContainer.appendChild(overlay);
+}
 
 // Reset Hint
 const resetHint = document.createElement('button');
