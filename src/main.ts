@@ -55,41 +55,66 @@ const currentLaunchAngle = { value: 0 };
 
 // -- Linear Slider --
 // -- Pointer Lock Drag Zone --
+// -- Pointer Lock Drag Zone (Touch Compatible) --
 const dragZone = document.createElement('div');
 dragZone.className = 'drag-zone';
 dragZone.innerText = "Adjust Launch Angle";
 launchContainer.appendChild(dragZone);
 
-// Stop propagation to prevent camera orbit when clicking slider
-// Pointer Lock logic
-// Pointer Lock logic: Press to Lock, Release to Unlock
-dragZone.addEventListener('pointerdown', () => {
-    dragZone.requestPointerLock();
+let isAiming = false;
+let previousAimX = 0;
+
+dragZone.addEventListener('pointerdown', (e) => {
+    isAiming = true;
+    previousAimX = e.clientX;
     dragZone.classList.add('active');
-});
+    dragZone.setPointerCapture(e.pointerId);
 
-document.addEventListener('pointerup', () => {
-    if (document.pointerLockElement === dragZone) {
-        document.exitPointerLock();
-        dragZone.classList.remove('active');
+    // Attempt pointer lock only for mouse to allow infinite scrolling feel
+    if (e.pointerType === 'mouse') {
+        dragZone.requestPointerLock();
     }
 });
 
-document.addEventListener('mousemove', (e) => {
-    if (document.pointerLockElement === dragZone) {
-        const sensitivity = 0.5;
-        let newAngle = currentLaunchAngle.value + e.movementX * sensitivity;
+// Unified pointer move handler
+dragZone.addEventListener('pointermove', (e) => {
+    if (!isAiming) return;
 
-        // Wrap angle 0-360
-        if (newAngle >= 360) newAngle -= 360;
-        if (newAngle < 0) newAngle += 360;
+    // Use movementX if available (mostly mouse with lock), else calculate delta (touch)
+    let deltaX = e.movementX;
 
-        currentLaunchAngle.value = newAngle;
-
-        // Update Guide & Visuals
-        updateGuide(currentLaunchAngle.value);
+    // If movementX is unreliable or zero during touch (common), use clientX delta
+    // Note: movementX might be 0 on touch, or available in modern browsers. 
+    // We check if we are NOT locked, then we MUST use clientX delta.
+    if (document.pointerLockElement !== dragZone) {
+        deltaX = e.clientX - previousAimX;
+        previousAimX = e.clientX;
     }
+
+    // Apply sensitivity
+    const sensitivity = 0.5;
+    let newAngle = currentLaunchAngle.value + deltaX * sensitivity;
+
+    // Wrap angle 0-360
+    if (newAngle >= 360) newAngle -= 360;
+    if (newAngle < 0) newAngle += 360;
+
+    currentLaunchAngle.value = newAngle;
+
+    // Update Guide & Visuals
+    updateGuide(currentLaunchAngle.value);
 });
+
+const endAim = (e: PointerEvent) => {
+    if (!isAiming) return;
+    isAiming = false;
+    dragZone.classList.remove('active');
+    dragZone.releasePointerCapture(e.pointerId);
+    if (document.exitPointerLock) document.exitPointerLock();
+};
+
+dragZone.addEventListener('pointerup', endAim);
+dragZone.addEventListener('pointercancel', endAim);
 
 
 
@@ -343,7 +368,7 @@ arenaGroup.add(wallMesh);
 
 
 // Helper to create Beyblade 3D Model
-function createBeybladeMesh(color: number): { mesh: THREE.Group, tiltGroup: THREE.Group, spinGroup: THREE.Group } {
+function createBeybladeMesh(stats: BeybladeStats): { mesh: THREE.Group, tiltGroup: THREE.Group, spinGroup: THREE.Group } {
     const mesh = new THREE.Group();
     const tiltGroup = new THREE.Group();
     const spinGroup = new THREE.Group();
@@ -351,46 +376,56 @@ function createBeybladeMesh(color: number): { mesh: THREE.Group, tiltGroup: THRE
     mesh.add(tiltGroup);
     tiltGroup.add(spinGroup);
 
-    // 1. Metal Wheel (Base) - Heavy, shiny
+    // Apply global scale
+    spinGroup.scale.setScalar(stats.beyScale || 1.0);
+
+    // 1. Metal Wheel (Base)
     const wheelGeo = new THREE.CylinderGeometry(BEYBLADE_RADIUS, BEYBLADE_RADIUS, 4, 32);
     const wheelMat = new THREE.MeshMatcapMaterial({
-        color: 0x666666,
+        color: stats.wheelColor || 0x888888,
     });
     const wheel = new THREE.Mesh(wheelGeo, wheelMat);
     wheel.position.y = 5;
     spinGroup.add(wheel);
 
-    // 2. Clear Wheel / Energy Ring - Colored
-    const ringGeo = new THREE.CylinderGeometry(BEYBLADE_RADIUS * .75, BEYBLADE_RADIUS * .75, 8, 32); // Octagonal for "blade" look
+    // 2. Clear Wheel / Energy Ring
+    const ringRadius = BEYBLADE_RADIUS * (stats.ringRadiusFactor || 0.75);
+    const ringGeo = new THREE.CylinderGeometry(ringRadius, ringRadius, 8, stats.ringSides || 32);
     const ringMat = new THREE.MeshMatcapMaterial({
-        color: color,
+        color: stats.ringColor || 0x0088ff,
     });
 
     const ring = new THREE.Mesh(ringGeo, ringMat);
     ring.position.y = 6;
     spinGroup.add(ring);
 
-    // 3. Face Bolt - Top center
-    const boltGeo = new THREE.CylinderGeometry(10, 10, 4, 6); // Hex
-    const boltMat = new THREE.MeshMatcapMaterial({ color: 0xaaeeff });
+    // 3. Face Bolt
+    const boltGeo = new THREE.CylinderGeometry(10, 10, 4, stats.boltSides || 6);
+    const boltMat = new THREE.MeshMatcapMaterial({
+        color: stats.boltColor || 0x00ccff,
+    });
     const bolt = new THREE.Mesh(boltGeo, boltMat);
     bolt.position.y = 12;
     spinGroup.add(bolt);
 
-    const spinTrackGeo = new THREE.CylinderGeometry(BEYBLADE_RADIUS * .3, BEYBLADE_RADIUS * .2, 6, 10);
+    // 4. Spin Track
+    const stSize = stats.spinTrackSize || 1.0;
+    const spinTrackGeo = new THREE.CylinderGeometry(BEYBLADE_RADIUS * .3 * stSize, BEYBLADE_RADIUS * .2 * stSize, 6, 10);
     const spinTrackMat = new THREE.MeshMatcapMaterial({
-        color: 0x222222,
+        color: stats.spinTrackColor || 0x222222,
     });
     const spinTrack = new THREE.Mesh(spinTrackGeo, spinTrackMat);
     spinTrack.position.y = -2;
     spinGroup.add(spinTrack);
 
-    // 4. Tip (Bottom) - Small cone
-    const tipGeo = new THREE.CylinderGeometry(5, 2, 10);
-    const tipMat = new THREE.MeshMatcapMaterial({ color: 0xaa4488 });
+    // 5. Tip
+    const tSize = stats.tipSize || 1.0;
+    const tipGeo = new THREE.CylinderGeometry(5 * tSize, 2 * tSize, 10);
+    const tipMat = new THREE.MeshMatcapMaterial({
+        color: stats.tipColor || 0x333333,
+    });
     const tip = new THREE.Mesh(tipGeo, tipMat);
     tip.position.y = -5;
-    // Don't add to spin group to keep it stable? No, it spins.
     spinGroup.add(tip);
 
     return { mesh, tiltGroup, spinGroup };
@@ -455,19 +490,30 @@ class TrailSystem {
 }
 // --- Game Logic ---
 interface BeybladeStats {
-    maxRpm: number; // HP
-    atk: number;    // Damage dealt
-    def: number;    // Damage mitigation
-    wt: number;     // Mass
-    sta: number;    // RPM loss per second
-    spd: number;    // Launch speed factor (Max Velocity)
-    spl: number;    // Special charges (TBD)
-    crt: number;    // Critical hit chance (0.0 - 1.0)
+    maxRpm: number;
+    atk: number;
+    def: number;
+    wt: number;
+    sta: number;
+    spd: number;
+    spl: number;
+    crt: number;
     frictionAir: number;
-    // Physics Properties (Fixed defaults)
     restitution: number;
     friction: number;
     densityBase: number;
+    // Visual Stats
+    beyScale: number;
+    wheelColor: number;
+    ringColor: number;
+    ringSides: number;
+    ringRadiusFactor: number;
+    boltColor: number;
+    boltSides: number;
+    spinTrackColor: number;
+    spinTrackSize: number;
+    tipColor: number;
+    tipSize: number;
 }
 
 interface GameEntity {
@@ -494,26 +540,50 @@ const PLAYER_STATS: BeybladeStats = {
     sta: 10,
     spd: 120,
     spl: 0,
-    crt: 0.2, // 20% crit
+    crt: 0.2,
     restitution: 0.1,
     friction: 0.2,
     frictionAir: 0.005,
-    densityBase: 0.05
+    densityBase: 0.05,
+    // Visuals (Blue Theme)
+    beyScale: 1.0,
+    wheelColor: 0x888888,
+    ringColor: 0x0088ff, // Blue
+    ringSides: 32,
+    ringRadiusFactor: 0.75,
+    boltColor: 0x00ccff, // Cyan
+    boltSides: 6,
+    spinTrackColor: 0x222222,
+    spinTrackSize: 1.0,
+    tipColor: 0x333333,
+    tipSize: 1.0
 };
 
 const ENEMY_STATS: BeybladeStats = {
     maxRpm: 1000,
     atk: 80,
     def: 50,
-    wt: 0.2, // Lighter
+    wt: 0.2,
     sta: 15,
     spd: 100,
     spl: 0,
-    crt: 0.1, // 10% crit
+    crt: 0.1,
     restitution: 0.1,
     friction: 0.2,
     frictionAir: 0.005,
-    densityBase: 0.05
+    densityBase: 0.05,
+    // Visuals (Orange Theme)
+    beyScale: 1.0,
+    wheelColor: 0x888888,
+    ringColor: 0xff6600, // Orange
+    ringSides: 32,
+    ringRadiusFactor: 0.75,
+    boltColor: 0xffaa00, // Gold
+    boltSides: 6,
+    spinTrackColor: 0x222222,
+    spinTrackSize: 1.0,
+    tipColor: 0x333333,
+    tipSize: 1.0
 };
 
 const DEFAULT_PLAYER_STATS = { ...PLAYER_STATS };
@@ -544,7 +614,7 @@ function resetPresets() {
 loadPresets();
 
 
-function createBeyblade(x: number, y: number, color: number, stats: BeybladeStats): GameEntity {
+function createBeyblade(x: number, y: number, stats: BeybladeStats): GameEntity {
     // Physics Body - Mass derived from stats.wt
     // Physics Body - Mass derived from stats.wt and config density
     // Physics Body - Mass derived from stats.wt and config density
@@ -559,11 +629,11 @@ function createBeyblade(x: number, y: number, color: number, stats: BeybladeStat
     });
 
     // Visuals
-    const { mesh, tiltGroup, spinGroup } = createBeybladeMesh(color);
+    const { mesh, tiltGroup, spinGroup } = createBeybladeMesh(stats);
     scene.add(mesh); // Add to scene
 
     // Trail
-    const trail = new TrailSystem(color, scene);
+    const trail = new TrailSystem(stats.ringColor, scene);
 
     // Initial Spawn
     Composite.add(engine.world, body);
@@ -583,8 +653,8 @@ function createBeyblade(x: number, y: number, color: number, stats: BeybladeStat
 }
 
 // Create Player and Enemy
-const player = createBeyblade(0, 100, 0x9966ff, PLAYER_STATS);
-const enemy = createBeyblade(0, -100, 0xff6622, ENEMY_STATS);
+const player = createBeyblade(0, 100, PLAYER_STATS);
+const enemy = createBeyblade(0, -100, ENEMY_STATS);
 
 // Initial Guide Update
 updateGuide(0);
@@ -621,7 +691,7 @@ const hudTopBar = document.createElement('div');
 hudTopBar.id = 'hud-top-bar';
 hudTopBar.innerHTML = `
     <div class="hud-group">
-        <span class="rpm-label">P1</span>
+        <button class="rpm-label" id="p1-btn" style="cursor: pointer; text-decoration: underline;">P1</button>
         <span id="player-rpm" class="rpm-text">0</span>
         <meter id="player-meter" min="0" max="1000" low="200" high="800" optimum="1000" value="0"></meter>
     </div>
@@ -629,134 +699,257 @@ hudTopBar.innerHTML = `
     <div class="hud-group">
         <meter id="enemy-meter" min="0" max="1000" low="200" high="800" optimum="1000" value="0" style="transform: scaleX(-1);"></meter>
         <span id="enemy-rpm" class="rpm-text">0</span>
-        <span class="rpm-label">CPU</span>
+        <button class="rpm-label" id="cpu-btn" style="cursor: pointer; text-decoration: underline;">CPU</button>
     </div>
 `;
 uiContainer.appendChild(hudTopBar);
 
-// Presets Button
-const presetsBtn = document.createElement('button');
-presetsBtn.className = 'presets-btn';
-presetsBtn.innerText = 'Presets';
-presetsBtn.onclick = openPresetsModal; // Moved handler here or keep at bottom
-uiContainer.appendChild(presetsBtn);
+// Presets Button Trigger Logic
+setTimeout(() => {
+    const p1Btn = document.getElementById('p1-btn');
+    const cpuBtn = document.getElementById('cpu-btn');
 
-// Presets Config Data Structure for UI Generation
+    if (p1Btn) p1Btn.onclick = () => openPresetsModal(PLAYER_STATS, 'Player');
+    if (cpuBtn) cpuBtn.onclick = () => openPresetsModal(ENEMY_STATS, 'CPU');
+}, 0);
+
 const PRESET_FIELDS = [
-    { key: 'maxRpm', label: 'RPM', hint: 'Spin Speed (HP)' },
-    { key: 'spd', label: 'SPD', hint: 'Launch Velocity' },
-    { key: 'atk', label: 'ATK', hint: 'Damage dealt' },
-    { key: 'def', label: 'DEF', hint: 'Damage reduction' },
-    { key: 'wt', label: 'WT', hint: 'Weight / Mass' },
-    { key: 'sta', label: 'STA', hint: 'Stamina / Endurance' },
-    { key: 'crt', label: 'CRT', hint: 'Crit Chance (0-1)' },
-    // Air Drag is still useful to tune feel, others are fixed
-    { key: 'frictionAir', label: 'Drag', hint: 'Air resistance' }
+    { key: 'maxRpm', label: 'RPM', hint: 'Spin Speed', type: 'number', step: 10 },
+    { key: 'spd', label: 'SPD', hint: 'Launch Velocity', type: 'number', step: 10 },
+    { key: 'atk', label: 'ATK', hint: 'Damage', type: 'number', step: 1 },
+    { key: 'def', label: 'DEF', hint: 'Reduction', type: 'number', step: 1 },
+    { key: 'wt', label: 'WT', hint: 'Weight', type: 'number', step: 0.1 },
+    { key: 'sta', label: 'STA', hint: 'Endurance', type: 'number', step: 1 },
+    { key: 'crt', label: 'CRT', hint: 'Crit %', type: 'number', step: 0.05 },
+    { key: 'frictionAir', label: 'Drag', hint: 'Resistance', type: 'number', step: 0.001 },
 ];
 
-function createInput(id: string, label: string, value: number, hint: string, onChange: (val: number) => void) {
+const VISUAL_FIELDS = [
+    { key: 'beyScale', label: 'BEY SIZE', hint: 'Scale', type: 'number', step: 0.1 },
+    { key: 'wheelColor', label: 'WHEEL COLOR', hint: 'Metal color', type: 'color' },
+    { key: 'ringColor', label: 'RING COLOR', hint: 'Energy color', type: 'color' },
+    { key: 'ringRadiusFactor', label: 'RING RADIUS', hint: 'Size factor', type: 'number', step: 0.05 },
+    { key: 'ringSides', label: 'RING SIDES', hint: 'Shape sides', type: 'number', step: 1 },
+    { key: 'boltColor', label: 'BOLT COLOR', hint: 'Face color', type: 'color' },
+    { key: 'boltSides', label: 'BOLT SIDES', hint: 'Hex/Circle', type: 'number', step: 1 },
+    { key: 'spinTrackColor', label: 'ST COLOR', hint: 'Track color', type: 'color' },
+    { key: 'spinTrackSize', label: 'ST SIZE', hint: 'Track depth', type: 'number', step: 0.1 },
+    { key: 'tipColor', label: 'TIP COLOR', hint: 'Base color', type: 'color' },
+    { key: 'tipSize', label: 'TIP SIZE', hint: 'Radius', type: 'number', step: 0.1 },
+];
+
+function createInput(id: string, label: string, value: any, hint: string, type: string, step: number | string, onChange: (val: any) => void) {
     const div = document.createElement('div');
     div.className = 'stat-item';
 
+    // Handle color values (hex num to #hex str)
+    let displayValue = value;
+    if (type === 'color') {
+        displayValue = '#' + value.toString(16).padStart(6, '0');
+    }
+
     div.innerHTML = `
         <label class="stat-label" for="${id}">${label}</label>
-        <input class="stat-input" type="number" step="0.01" id="${id}" value="${value}">
+        <input class="stat-input" type="${type}" ${type === 'number' ? `step="${step}"` : ''} id="${id}" value="${displayValue}">
         <span class="stat-hint">${hint}</span>
     `;
 
     const input = div.querySelector('input')!;
-    input.addEventListener('change', (e) => {
-        const val = parseFloat((e.target as HTMLInputElement).value);
+    input.addEventListener('input', (e) => {
+        let val: any = (e.target as HTMLInputElement).value;
+        if (type === 'number') val = parseFloat(val);
+        if (type === 'color') val = parseInt(val.replace('#', ''), 16);
         onChange(val);
     });
 
     return div;
 }
 
-function openPresetsModal() {
+// Preview Scene Helper
+let previewRenderer: THREE.WebGLRenderer | null = null;
+let previewScene: THREE.Scene | null = null;
+let previewCamera: THREE.PerspectiveCamera | null = null;
+let previewBeyblade: { mesh: THREE.Group, tiltGroup: THREE.Group, spinGroup: THREE.Group } | null = null;
+
+function updatePreview(stats: BeybladeStats) {
+    if (!previewScene) return;
+    if (previewBeyblade) {
+        previewScene.remove(previewBeyblade.mesh);
+    }
+    previewBeyblade = createBeybladeMesh(stats);
+    previewScene.add(previewBeyblade.mesh);
+}
+
+function openPresetsModal(targetStats: BeybladeStats, targetName: string) {
+    let previewControls: OrbitControls | null = null;
+    // Create a working copy of stats so we don't apply immediately
+    const tempStats = { ...targetStats };
+
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
 
     const content = document.createElement('div');
     content.className = 'modal-content';
 
-    // Header
     const header = document.createElement('div');
     header.className = 'modal-header';
-    header.innerHTML = `<span class="modal-title">Tune Presets</span>`;
+    header.innerHTML = `<span class="modal-title">Customise ${targetName} Beyblade</span>`;
     const closeBtn = document.createElement('button');
     closeBtn.className = 'modal-close';
     closeBtn.innerText = '×';
-    closeBtn.onclick = () => { uiContainer.removeChild(overlay); };
+    closeBtn.onclick = () => {
+        uiContainer.removeChild(overlay);
+        if (previewRenderer) {
+            previewRenderer.dispose();
+            previewRenderer = null;
+        }
+        if (previewControls) {
+            previewControls.dispose();
+            previewControls = null;
+        }
+    };
     header.appendChild(closeBtn);
     content.appendChild(header);
 
+    // --- Visual Forge Section (Compact & Wrapped) ---
+    const vSection = document.createElement('div');
+    vSection.className = 'stat-section';
+    vSection.innerHTML = `<div class="section-title">Visual Forge</div>`;
+
+    const vContainer = document.createElement('div');
+    vContainer.className = 'forge-container';
+    vSection.appendChild(vContainer);
+
+    // 1. Preview (Floated Left)
+    const previewContainer = document.createElement('div');
+    previewContainer.className = 'preview-float';
+    vContainer.appendChild(previewContainer);
+
+    VISUAL_FIELDS.forEach(field => {
+        // Custom compact input creation
+        const div = createInput(
+            `v-${field.key}`,
+            field.label,
+            (targetStats as any)[field.key], // Use targetStats for initial display
+            field.hint,
+            field.type,
+            field.step || 1,
+            (val) => {
+                (tempStats as any)[field.key] = val;
+                updatePreview(tempStats);
+            }
+        );
+        div.className = 'stat-item'; // Override class for compact flow
+        vContainer.appendChild(div);
+    });
+    content.appendChild(vSection);
+
+    // Setup Preview Scene
+    setTimeout(() => {
+        const width = previewContainer.clientWidth;
+        const height = previewContainer.clientHeight;
+
+        previewRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        previewRenderer.setPixelRatio(window.devicePixelRatio);
+        previewRenderer.setSize(width, height);
+        previewRenderer.setClearColor(0x000000, 0);
+        previewContainer.appendChild(previewRenderer.domElement);
+
+        previewScene = new THREE.Scene();
+        previewCamera = new THREE.PerspectiveCamera(50, width / height, 1, 1000);
+        previewCamera.position.set(0, 40, 60);
+        previewCamera.lookAt(0, 5, 0);
+
+        // Orbit Controls for Preview
+        previewControls = new OrbitControls(previewCamera, previewRenderer.domElement);
+
+        // Lights
+        const ambient = new THREE.AmbientLight(0xffffff, 2);
+        previewScene.add(ambient);
+        const dir = new THREE.DirectionalLight(0xffffff, 3);
+        dir.position.set(10, 50, 20);
+        previewScene.add(dir);
+
+        updatePreview(tempStats);
+
+        function animatePreview() {
+            if (!previewRenderer) return;
+            requestAnimationFrame(animatePreview);
+
+            if (previewControls) previewControls.update();
+
+            // No auto spin/wobble as requested
+            // if (previewBeyblade) {
+            //     previewBeyblade.spinGroup.rotation.y += 0.1;
+            // }
+
+            previewRenderer.render(previewScene!, previewCamera!);
+        }
+        animatePreview();
+    }, 0);
 
 
-    // 1. Player Stats
+    // --- Combat Stats Section (Bottom) ---
     const pSection = document.createElement('div');
     pSection.className = 'stat-section';
-    pSection.innerHTML = `<div class="section-title">Player Stats</div>`;
+    pSection.innerHTML = `<div class="section-title">Combat Logic</div>`;
     const pGrid = document.createElement('div');
     pGrid.className = 'stat-grid';
     PRESET_FIELDS.forEach(field => {
         pGrid.appendChild(createInput(
             `p-${field.key}`,
             field.label,
-            (PLAYER_STATS as any)[field.key],
+            (targetStats as any)[field.key], // Use targetStats for initial display
             field.hint,
-            (val) => { (PLAYER_STATS as any)[field.key] = val; }
+            field.type || 'number',
+            field.step || 0.01,
+            (val) => {
+                (tempStats as any)[field.key] = val;
+            }
         ));
     });
     pSection.appendChild(pGrid);
     content.appendChild(pSection);
 
-    // 2. Enemy Stats
-    const eSection = document.createElement('div');
-    eSection.className = 'stat-section';
-    eSection.innerHTML = `<div class="section-title">CPU Stats</div>`;
-    const eGrid = document.createElement('div');
-    eGrid.className = 'stat-grid';
-    PRESET_FIELDS.forEach(field => {
-        eGrid.appendChild(createInput(
-            `e-${field.key}`,
-            field.label,
-            (ENEMY_STATS as any)[field.key],
-            field.hint,
-            (val) => { (ENEMY_STATS as any)[field.key] = val; }
-        ));
-    });
-    eSection.appendChild(eGrid);
-    content.appendChild(eSection);
-
-
-
     // Actions
     const actions = document.createElement('div');
     actions.className = 'preset-actions';
 
-    // Reset Button
     const resetBtn = document.createElement('button');
-    resetBtn.className = 'action-btn reset'; // We can add a .reset class in CSS or just use action-btn
+    resetBtn.className = 'action-btn reset';
     resetBtn.innerText = 'Reset Defaults';
-    resetBtn.style.marginRight = 'auto'; // Push to left
+    resetBtn.style.marginRight = 'auto';
     resetBtn.onclick = () => {
-        if (confirm('Reset all stats to default?')) {
-            resetPresets();
+        if (confirm(`Reset all ${targetName} stats to default?`)) {
+            // Reset specific target
+            if (targetName === 'Player') Object.assign(PLAYER_STATS, DEFAULT_PLAYER_STATS);
+            if (targetName === 'CPU') Object.assign(ENEMY_STATS, DEFAULT_ENEMY_STATS);
+
+            // Re-open/refresh modal would be tricky recursively with new args, 
+            // easier to close and let user re-open, or just update UI?
+            // Let's close for simplicity to refresh state
             uiContainer.removeChild(overlay);
-            openPresetsModal(); // Re-open to refresh inputs
+            if (previewRenderer) {
+                previewRenderer.dispose();
+                previewRenderer = null;
+            }
         }
     };
     actions.appendChild(resetBtn);
 
-    // Save Button
     const saveBtn = document.createElement('button');
     saveBtn.className = 'action-btn save';
     saveBtn.innerText = 'Save & Apply';
     saveBtn.onclick = () => {
-        savePresets();
+        // Commit temp stats to actual target stats
+        Object.assign(targetStats, tempStats);
+        savePresets(); // Save everything
         uiContainer.removeChild(overlay);
-        resetMatch(); // Soft reset
+        if (previewRenderer) {
+            previewRenderer.dispose();
+            previewRenderer = null;
+        }
+        resetMatch();
     };
     actions.appendChild(saveBtn);
     content.appendChild(actions);
@@ -765,13 +958,15 @@ function openPresetsModal() {
     uiContainer.appendChild(overlay);
 }
 
-presetsBtn.onclick = openPresetsModal;
+// Remove old listener assignment if exists
+// presetsBtn.onclick = openPresetsModal; 
 
 
 // Reset Hint
-const resetHint = document.createElement('div');
-resetHint.className = 'reset-hint';
-resetHint.innerText = 'Drag to Launch | R to Reset';
+const resetHint = document.createElement('button');
+resetHint.className = 'reset-btn';
+resetHint.innerText = 'Reset';
+resetHint.onclick = resetMatch;
 uiContainer.appendChild(resetHint);
 
 const playerRpmEl = document.getElementById('player-rpm')!;
@@ -903,9 +1098,10 @@ Events.on(engine, 'collisionStart', (event) => {
                 entityA.currentRpm = Math.max(0, entityA.currentRpm - dmgB);
             }
 
-            // Sparks - Color based on Crit
+            // Sparks - White by default, Attacker color on Crit
+            const attacker = critA ? entityA : (critB ? entityB : null);
+            const sparkColor = attacker ? attacker.stats!.ringColor : 0xffffff;
             const isCrit = critA || critB;
-            const sparkColor = isCrit ? 0xffffff : 0xffaa00;
             const count = isCrit ? 15 : 5;
             const speed = isCrit ? 5 : 2;
 
@@ -923,7 +1119,7 @@ Events.on(engine, 'collisionStart', (event) => {
             if (pair.collision.supports.length > 0) {
                 const { x, y } = pair.collision.supports[0];
                 for (let i = 0; i < 5; i++) {
-                    createSpark(x, y, 0xffaa00, 2);
+                    createSpark(x, y, 0xaaaaaa, 2);
                 }
             }
             playCollisionSound(0.1, false);
@@ -1267,6 +1463,46 @@ function showWinner(text: string) {
     document.body.appendChild(overlay);
 }
 
+const resetEntityVisualsAndPhysics = (entity: GameEntity, stats: BeybladeStats, startPos: { x: number, y: number }) => {
+    // 1. Remove old visual mesh
+    scene.remove(entity.mesh);
+
+    // 2. Create new visual mesh
+    const newVisuals = createBeybladeMesh(stats);
+    entity.mesh = newVisuals.mesh;
+    entity.tiltGroup = newVisuals.tiltGroup;
+    entity.spinGroup = newVisuals.spinGroup;
+    scene.add(entity.mesh);
+
+    // 3. Update Physics Body
+    const density = stats.densityBase * stats.wt;
+    Body.setDensity(entity.body, density);
+    entity.body.restitution = stats.restitution;
+    entity.body.friction = stats.friction;
+    entity.body.frictionAir = stats.frictionAir;
+
+    // Reset Physics State
+    Body.setPosition(entity.body, startPos);
+    Body.setVelocity(entity.body, { x: 0, y: 0 });
+    Body.setAngularVelocity(entity.body, 0);
+    Body.setAngle(entity.body, 0);
+
+    // Reset Visual Position
+    entity.mesh.position.set(startPos.x, getArenaHeight(startPos.x, startPos.y) + 10, startPos.y); // Matter Y is Three Z
+    entity.mesh.quaternion.set(0, 0, 0, 1);
+
+    // 4. Update Trail Color
+    if (entity.trail && entity.trail.mesh.material instanceof THREE.LineBasicMaterial) {
+        entity.trail.mesh.material.color.setHex(stats.ringColor);
+        entity.trail.clear();
+    }
+
+    // 5. Reset Game Logic Stats
+    entity.stats = stats; // Ensure reference is up to date
+    entity.isDead = false;
+    entity.currentRpm = 0;
+};
+
 function resetMatch() {
     hasLaunched = false;
     gameOver = false;
@@ -1276,41 +1512,12 @@ function resetMatch() {
     sparks.forEach(s => scene.remove(s.mesh));
     sparks.length = 0;
 
-    // Reset Entities
-    // Player
-    Body.setPosition(player.body, { x: 0, y: 100 });
-    Body.setVelocity(player.body, { x: 0, y: 0 });
-    Body.setAngularVelocity(player.body, 0);
-    Body.setAngle(player.body, 0); // Reset angle
+    // Reset Entities (Visuals + Physics)
+    resetEntityVisualsAndPhysics(player, PLAYER_STATS, { x: 0, y: 100 });
+    resetEntityVisualsAndPhysics(enemy, ENEMY_STATS, { x: 0, y: -100 });
 
-    player.mesh.position.set(0, getArenaHeight(0, 100) + 10, 100);
-    player.mesh.quaternion.set(0, 0, 0, 1); // Reset orientation
-    player.tiltGroup.rotation.set(0, 0, 0);
-    player.spinGroup.rotation.set(0, 0, 0);
-
-    player.trail.clear(); // Reset trajectory
-
-    player.isDead = false;
-    player.currentRpm = 0;
-
-    // Enemy
-    Body.setPosition(enemy.body, { x: 0, y: -100 });
-    Body.setVelocity(enemy.body, { x: 0, y: 0 });
-    Body.setAngularVelocity(enemy.body, 0);
-    Body.setAngle(enemy.body, 0); // Reset angle
-
-    enemy.mesh.position.set(0, getArenaHeight(0, -100) + 10, -100);
-    enemy.mesh.quaternion.set(0, 0, 0, 1); // Reset orientation
-    enemy.tiltGroup.rotation.set(0, 0, 0);
-    enemy.spinGroup.rotation.set(0, 0, 0);
-
-    enemy.trail.clear(); // Reset trajectory
-
-    enemy.isDead = false;
-    enemy.currentRpm = 0;
-
-    // Ensure bodies are in world (in case they were removed by death)
-    Composite.remove(engine.world, player.body); // Safe remove first
+    // Ensure bodies are in world (safe add)
+    Composite.remove(engine.world, player.body);
     Composite.remove(engine.world, enemy.body);
     Composite.add(engine.world, [player.body, enemy.body]);
 
