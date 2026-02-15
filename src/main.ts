@@ -3,7 +3,6 @@ import Matter from 'matter-js';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import "./style.css";
-// import "./CircularRange"; // Import the web component
 
 // --- Physics Setup (Matter.js) ---
 const Engine = Matter.Engine;
@@ -45,9 +44,7 @@ camera.lookAt(0, 0, 0);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio); // Fix pixelation
-renderer.autoClear = false; // We will clear manually for gizmo overlay
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
 
 // --- Orbit Controls ---
@@ -544,23 +541,203 @@ interface GameEntity {
 }
 const entities: GameEntity[] = [];
 
+// --- Power-Up System ---
+interface PowerUp {
+    id: string;
+    label: string;
+    detail: string;
+    apply: (entity: GameEntity) => void;
+}
+
+// Power-Up Type Definitions
+const POWERUP_TYPES: PowerUp[] = [
+    {
+        id: 'rpm_boost',
+        label: 'RPM +100',
+        detail: 'Spin Speed',
+        apply: (entity) => {
+            if (entity.stats) entity.stats.maxRpm += 100;
+            if (entity.currentRpm !== undefined) entity.currentRpm += 100;
+        }
+    },
+    {
+        id: 'atk_boost',
+        label: 'ATK +5',
+        detail: 'Increased Damage',
+        apply: (entity) => {
+            if (entity.stats) entity.stats.atk += 5;
+        }
+    },
+    {
+        id: 'def_boost',
+        label: 'DEF +5',
+        detail: 'Reduced Damage',
+        apply: (entity) => {
+            if (entity.stats) entity.stats.def += 5;
+        }
+    },
+    {
+        id: 'sta_drain',
+        label: 'DECAY -5%',
+        detail: 'Decay Rate',
+        apply: (entity) => {
+            if (entity.stats) entity.stats.sta *= 0.95;
+        }
+    },
+    {
+        id: 'crit_boost',
+        label: 'CRT +5%',
+        detail: 'Crit Chance',
+        apply: (entity) => {
+            if (entity.stats) entity.stats.crt *= 1.05;
+        }
+    },
+    {
+        id: 'drag_high',
+        label: 'DRAG High',
+        detail: 'Air Friction',
+        apply: (entity) => {
+            if (entity.stats) {
+                entity.stats.frictionAir = 0.01;
+                entity.body.frictionAir = entity.stats.frictionAir;
+            }
+        }
+    },
+    {
+        id: 'drag_low',
+        label: 'DRAG Low',
+        detail: 'Air Friction',
+        apply: (entity) => {
+            if (entity.stats) {
+                entity.stats.frictionAir = 0.005;
+                entity.body.frictionAir = entity.stats.frictionAir;
+            }
+        }
+    },
+    {
+        id: 'dish_high',
+        label: 'DISH High',
+        detail: 'Dish=2',
+        apply: (entity) => {
+            if (entity.stats) entity.stats.dishForce = 2;
+        }
+    },
+    {
+        id: 'dish_low',
+        label: 'DISH Low',
+        detail: 'Dish=1',
+        apply: (entity) => {
+            if (entity.stats) entity.stats.dishForce = 1;
+        }
+    },
+    {
+        id: 'curl_increase',
+        label: 'CURL High',
+        detail: 'Tangential',
+        apply: (entity) => {
+            if (entity.stats) entity.stats.curlForce = 10;
+        }
+    },
+    {
+        id: 'curl_decrease',
+        label: 'CURL Low',
+        detail: 'Tangential',
+        apply: (entity) => {
+            if (entity.stats) entity.stats.curlForce = 1;
+        }
+    }
+];
+
+// Power-Up Pool Configuration (default counts)
+interface PoolConfig {
+    [key: string]: number;
+}
+
+const DEFAULT_POOL_CONFIG: PoolConfig = {
+    'rpm_boost': 3,
+    'atk_boost': 3,
+    'def_boost': 3,
+    'sta_drain': 2,
+    'crit_boost': 2,
+    'drag_high': 2,
+    'drag_low': 2,
+    'dish_high': 2,
+    'dish_low': 2,
+    'curl_high': 2,
+    'curl_low': 2
+};
+
+class PowerUpPool {
+    private pool: PowerUp[] = [];
+    private config: PoolConfig;
+
+    constructor(config: PoolConfig = DEFAULT_POOL_CONFIG) {
+        this.config = { ...config };
+        this.initialize();
+    }
+
+    initialize() {
+        this.pool = [];
+        for (const powerup of POWERUP_TYPES) {
+            const count = this.config[powerup.id] || 0;
+            for (let i = 0; i < count; i++) {
+                this.pool.push(powerup);
+            }
+        }
+        // Shuffle pool
+        for (let i = this.pool.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [this.pool[i], this.pool[j]] = [this.pool[j], this.pool[i]];
+        }
+    }
+
+    draw(count: number): PowerUp[] {
+        const drawn: PowerUp[] = [];
+        for (let i = 0; i < count && this.pool.length > 0; i++) {
+            const index = Math.floor(Math.random() * this.pool.length);
+            drawn.push(this.pool[index]);
+            // Don't remove yet - only remove when selected
+        }
+        return drawn;
+    }
+
+    remove(powerup: PowerUp) {
+        const index = this.pool.findIndex(p => p.id === powerup.id);
+        if (index !== -1) {
+            this.pool.splice(index, 1);
+        }
+    }
+
+    updateConfig(newConfig: PoolConfig) {
+        this.config = { ...newConfig };
+        this.initialize();
+    }
+
+    getRemaining(): number {
+        return this.pool.length;
+    }
+}
+
+// Global pool instance
+let powerUpPool = new PowerUpPool();
+
 // Stats Presets
 const PLAYER_STATS: BeybladeStats = {
     maxRpm: 1000,
-    atk: 90,
-    def: 50,
+    atk: 30,
+    def: 20,
     wt: 1.0,
-    sta: 10,
-    spd: 120,
+    sta: 1,
+    spd: 60,
     spl: 0,
     crt: 0.2,
     restitution: 0.1,
     friction: 0.2,
-    frictionAir: 0.005,
+    frictionAir: 0.001,
     densityBase: 0.05,
     // Arena Forces
-    dishForce: 1.0,  // Normal dish effect
-    curlForce: 2.5,  // Moderate curl
+    dishForce: 2,  // Normal dish effect
+    curlForce: 1,  // Moderate curl
     // Visuals (Blue Theme)
     beyScale: 1.0,
     wheelColor: 0x888888,
@@ -577,20 +754,20 @@ const PLAYER_STATS: BeybladeStats = {
 
 const ENEMY_STATS: BeybladeStats = {
     maxRpm: 1000,
-    atk: 80,
-    def: 50,
-    wt: 0.75,
-    sta: 15,
-    spd: 100,
+    atk: 30,
+    def: 20,
+    wt: 1.0,
+    sta: 1,
+    spd: 60,
     spl: 0,
-    crt: 0.1,
+    crt: 0.2,
     restitution: 0.1,
     friction: 0.2,
-    frictionAir: 0.005,
+    frictionAir: 0.001,
     densityBase: 0.05,
     // Arena Forces
-    dishForce: 1.0,  // Normal dish effect
-    curlForce: 0,  // Lower curl for defense
+    dishForce: 2,  // Normal dish effect
+    curlForce: 1,  // Moderate curl
     // Visuals (Orange Theme)
     beyScale: 1.0,
     wheelColor: 0x888888,
@@ -609,6 +786,7 @@ const DEFAULT_PLAYER_STATS = { ...PLAYER_STATS };
 const DEFAULT_ENEMY_STATS = { ...ENEMY_STATS };
 
 function savePresets() {
+    console.log("Saving presets", PLAYER_STATS, ENEMY_STATS);
     localStorage.setItem('bblade_player_stats', JSON.stringify(PLAYER_STATS));
     localStorage.setItem('bblade_enemy_stats', JSON.stringify(ENEMY_STATS));
     console.log('Presets Saved!');
@@ -675,6 +853,10 @@ let isDragging = false;
 let hasLaunched = false;
 let gameOver = false;
 
+// Stats snapshots at match start (for "Keep Power-Ups" reset)
+let matchStartPlayerStats: BeybladeStats | null = null;
+let matchStartEnemyStats: BeybladeStats | null = null;
+
 // Drag line visual (Three.js Line)
 const dragLineGeometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0)]);
 const dragLineMaterial = new THREE.LineBasicMaterial({ color: 0xffffff });
@@ -711,6 +893,26 @@ hudTopBar.innerHTML = `
     </div>
 `;
 uiContainer.appendChild(hudTopBar);
+
+// Floating Action HUD (Pool + Reset buttons)
+const actionHud = document.createElement('div');
+actionHud.id = 'action-hud';
+actionHud.className = 'action-hud';
+
+const poolBtn = document.createElement('button');
+poolBtn.className = 'action-hud-btn';
+poolBtn.innerText = 'POOL';
+poolBtn.onclick = () => openPoolEditor();
+actionHud.appendChild(poolBtn);
+
+const resetHint = document.createElement('button');
+resetHint.className = 'action-hud-btn';
+resetHint.innerText = 'RESET';
+resetHint.onclick = showResetDialog;
+resetHint.style.display = 'none';
+actionHud.appendChild(resetHint);
+
+uiContainer.appendChild(actionHud);
 
 // Presets Button Trigger Logic
 setTimeout(() => {
@@ -1004,7 +1206,22 @@ function openPresetsModal(targetStats: BeybladeStats, targetName: string) {
             returnRenderer(previewRenderer); // Return to pool
             previewRenderer = null;
         }
-        resetMatch();
+
+        // Apply the updated stats by resetting entities with new stats
+        // This ensures visuals (colors, scale) and physics are all updated
+        if (!hasLaunched) {
+            // Reset entities with updated PLAYER_STATS/ENEMY_STATS
+            resetEntityVisualsAndPhysics(player, PLAYER_STATS, { x: 0, y: 100 });
+            resetEntityVisualsAndPhysics(enemy, ENEMY_STATS, { x: 0, y: -100 });
+
+            // Ensure bodies are in world
+            Composite.remove(engine.world, player.body);
+            Composite.remove(engine.world, enemy.body);
+            Composite.add(engine.world, [player.body, enemy.body]);
+        } else {
+            // If match is running, reset with new stats
+            resetMatch(false);
+        }
     };
     actions.appendChild(saveBtn);
     content.appendChild(actions);
@@ -1021,6 +1238,77 @@ function openPresetsModal(targetStats: BeybladeStats, targetName: string) {
                 previewControls.dispose();
                 previewControls = null;
             }
+        }
+    };
+
+    overlay.appendChild(content);
+    uiContainer.appendChild(overlay);
+}
+
+// Pool Editor Modal
+function openPoolEditor() {
+    const tempConfig: PoolConfig = { ...powerUpPool['config'] };
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+
+    const content = document.createElement('div');
+    content.className = 'modal-content';
+
+    const header = document.createElement('div');
+    header.className = 'modal-header';
+    header.innerHTML = `<span class="modal-title">Power-Up Pool Editor</span>`;
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'modal-close';
+    closeBtn.innerText = '×';
+    closeBtn.onclick = () => {
+        uiContainer.removeChild(overlay);
+    };
+    header.appendChild(closeBtn);
+    content.appendChild(header);
+
+    // Pool Config Section
+    const poolSection = document.createElement('div');
+    poolSection.className = 'stat-section';
+    poolSection.innerHTML = `<div class="section-title">Configure Pool Counts</div>`;
+    const poolGrid = document.createElement('div');
+    poolGrid.className = 'stat-grid';
+
+    POWERUP_TYPES.forEach(powerup => {
+        const div = createInput(
+            `pool-${powerup.id}`,
+            powerup.label,
+            tempConfig[powerup.id] || 0,
+            powerup.detail,
+            'number',
+            1,
+            (val) => {
+                tempConfig[powerup.id] = Math.max(0, Math.floor(val));
+            }
+        );
+        poolGrid.appendChild(div);
+    });
+
+    poolSection.appendChild(poolGrid);
+    content.appendChild(poolSection);
+
+    // Actions
+    const actions = document.createElement('div');
+    actions.className = 'preset-actions';
+
+    const goBtn = document.createElement('button');
+    goBtn.className = 'action-btn save';
+    goBtn.innerText = 'GO';
+    goBtn.onclick = () => {
+        powerUpPool.updateConfig(tempConfig);
+        uiContainer.removeChild(overlay);
+    };
+    actions.appendChild(goBtn);
+    content.appendChild(actions);
+
+    overlay.onclick = (e) => {
+        if (e.target === overlay) {
+            uiContainer.removeChild(overlay);
         }
     };
 
@@ -1073,12 +1361,148 @@ function showConfirmDialog(title: string, message: string, onConfirm: () => void
     uiContainer.appendChild(overlay);
 }
 
-// Reset Hint
-const resetHint = document.createElement('button');
-resetHint.className = 'reset-btn';
-resetHint.innerText = 'Reset';
-resetHint.onclick = resetMatch;
-uiContainer.appendChild(resetHint);
+// Power-Up Card Container
+const powerupContainer = document.createElement('div');
+powerupContainer.className = 'powerup-container';
+powerupContainer.style.display = 'none';
+uiContainer.appendChild(powerupContainer);
+
+// Power-Up Timer State
+let powerupTimer: number | null = null;
+let autoSelectTimeout: number | null = null;
+let currentPowerups: PowerUp[] = [];
+let playerSelection: PowerUp | null = null;
+let enemySelection: PowerUp | null = null;
+const POWERUP_INTERVAL = 5000; // 5 seconds
+
+function showPowerupCards() {
+    if (!hasLaunched || gameOver) return;
+
+    // Clear any existing auto-select timeout
+    if (autoSelectTimeout) {
+        clearTimeout(autoSelectTimeout);
+        autoSelectTimeout = null;
+    }
+
+    // Draw 3 cards from pool
+    currentPowerups = powerUpPool.draw(3);
+
+    if (currentPowerups.length === 0) {
+        // Pool exhausted
+        powerupContainer.style.display = 'none';
+        return;
+    }
+
+    // Clear container
+    powerupContainer.innerHTML = '';
+    playerSelection = null;
+    enemySelection = null;
+
+    // Create cards
+    currentPowerups.forEach((powerup, index) => {
+        const card = document.createElement('div');
+        card.className = 'powerup-card';
+        card.innerHTML = `
+            <div class="powerup-label">${powerup.label}</div>
+            <div class="powerup-detail">${powerup.detail}</div>
+            <div class="powerup-key">${index + 1}</div>
+        `;
+
+        // Click handler
+        card.onclick = () => selectPowerup(powerup, index);
+
+        powerupContainer.appendChild(card);
+    });
+
+    powerupContainer.style.display = 'flex';
+
+    // Auto-select after 5 seconds
+    autoSelectTimeout = window.setTimeout(() => {
+        if (!playerSelection && currentPowerups.length > 0) {
+            const middleIndex = Math.floor(currentPowerups.length / 2);
+            selectPowerup(currentPowerups[middleIndex], middleIndex, true);
+        }
+    }, POWERUP_INTERVAL);
+}
+
+function selectPowerup(powerup: PowerUp, index: number, isAutoSelect: boolean = false) {
+    if (playerSelection) return; // Already selected
+
+    playerSelection = powerup;
+
+    // Highlight selected card
+    const cards = powerupContainer.querySelectorAll('.powerup-card');
+    cards[index].classList.add('selected');
+
+    // CPU picks randomly at the same time
+    if (!enemySelection) {
+        const enemyIndex = Math.floor(Math.random() * currentPowerups.length);
+        enemySelection = currentPowerups[enemyIndex];
+    }
+
+    // Clear auto-select timeout if player selected manually
+    if (!isAutoSelect && autoSelectTimeout) {
+        clearTimeout(autoSelectTimeout);
+        autoSelectTimeout = null;
+    }
+
+    // Apply power-ups immediately
+    setTimeout(() => {
+        if (playerSelection) {
+            playerSelection.apply(player);
+            powerUpPool.remove(playerSelection);
+        }
+
+        if (enemySelection) {
+            enemySelection.apply(enemy);
+            // Only remove if different from player selection
+            if (!playerSelection || playerSelection.id !== enemySelection.id) {
+                powerUpPool.remove(enemySelection);
+            }
+        }
+
+        // Hide cards
+        powerupContainer.style.display = 'none';
+
+        // Show next cards after brief delay
+        setTimeout(() => {
+            showPowerupCards();
+        }, 500);
+    }, 500);
+}
+
+function startPowerupTimer() {
+    stopPowerupTimer(); // Clean up any existing timer
+
+    // Show first cards immediately
+    showPowerupCards();
+}
+
+function stopPowerupTimer() {
+    if (powerupTimer) {
+        clearInterval(powerupTimer);
+        powerupTimer = null;
+    }
+    if (autoSelectTimeout) {
+        clearTimeout(autoSelectTimeout);
+        autoSelectTimeout = null;
+    }
+    powerupContainer.style.display = 'none';
+}
+
+// Keyboard shortcuts for power-up selection
+window.addEventListener('keydown', (e) => {
+    if (!hasLaunched || gameOver || currentPowerups.length === 0) return;
+
+    const key = e.key;
+    if (key === '1' && currentPowerups[0]) {
+        selectPowerup(currentPowerups[0], 0);
+    } else if (key === '2' && currentPowerups[1]) {
+        selectPowerup(currentPowerups[1], 1);
+    } else if (key === '3' && currentPowerups[2]) {
+        selectPowerup(currentPowerups[2], 2);
+    }
+});
 
 const playerRpmEl = document.getElementById('player-rpm')!;
 const enemyRpmEl = document.getElementById('enemy-rpm')!;
@@ -1557,9 +1981,19 @@ launchBtn.addEventListener('click', () => {
         Body.setAngularVelocity(enemy.body, 50);
     }
 
+    // Save stats snapshot at match start (for "Keep Power-Ups" reset)
+    matchStartPlayerStats = JSON.parse(JSON.stringify(player.stats));
+    matchStartEnemyStats = JSON.parse(JSON.stringify(enemy.stats));
+
     // Hide UI handled in animate loop or here
     launchContainer.style.display = 'none';
-    resetHint.style.display = 'block'; // Show reset hint
+
+    // Update action HUD buttons
+    poolBtn.style.display = 'none';
+    resetHint.style.display = 'block';
+
+    // Start power-up timer
+    startPowerupTimer();
 });
 
 // Window Resize Handling
@@ -1592,7 +2026,7 @@ function showWinner(text: string) {
     rematchBtn.innerText = 'REMATCH';
     rematchBtn.onclick = () => {
         document.body.removeChild(overlay);
-        resetMatch();
+        showResetDialog();
     };
     overlay.appendChild(rematchBtn);
 
@@ -1650,18 +2084,53 @@ const resetEntityVisualsAndPhysics = (entity: GameEntity, stats: BeybladeStats, 
     entity.driftRotation = undefined;
 };
 
-function resetMatch() {
+function resetMatch(keepPowerups: boolean = false) {
     hasLaunched = false;
     gameOver = false;
+
+    // Update action HUD buttons
+    poolBtn.style.display = 'block';
     resetHint.style.display = 'none';
+
+    // Stop power-up timer and reset pool
+    stopPowerupTimer();
+    powerUpPool.initialize();
 
     // Clear Sparks
     sparks.forEach(s => scene.remove(s.mesh));
     sparks.length = 0;
 
-    // Reset Entities (Visuals + Physics)
-    resetEntityVisualsAndPhysics(player, PLAYER_STATS, { x: 0, y: 100 });
-    resetEntityVisualsAndPhysics(enemy, ENEMY_STATS, { x: 0, y: -100 });
+    if (keepPowerups) {
+        // Keep power-ups: Save current stats to localStorage and update PLAYER_STATS/ENEMY_STATS
+        if (player.stats && enemy.stats) {
+            // Update the global stats with current accumulated stats
+            Object.assign(PLAYER_STATS, player.stats);
+            Object.assign(ENEMY_STATS, enemy.stats);
+
+            // Save to localStorage
+            savePresets();
+
+            // Reset entities with the new stats
+            resetEntityVisualsAndPhysics(player, PLAYER_STATS, { x: 0, y: 100 });
+            resetEntityVisualsAndPhysics(enemy, ENEMY_STATS, { x: 0, y: -100 });
+        }
+    } else {
+        // Discard power-ups: Reset to match start stats (before power-ups were applied)
+        if (matchStartPlayerStats && matchStartEnemyStats) {
+
+            // Update global stats to match start snapshot
+            Object.assign(PLAYER_STATS, matchStartPlayerStats);
+            Object.assign(ENEMY_STATS, matchStartEnemyStats);
+
+            // Reset entities with match start stats
+            resetEntityVisualsAndPhysics(player, matchStartPlayerStats, { x: 0, y: 100 });
+            resetEntityVisualsAndPhysics(enemy, matchStartEnemyStats, { x: 0, y: -100 });
+        } else {
+            // Fallback if no snapshot exists
+            resetEntityVisualsAndPhysics(player, PLAYER_STATS, { x: 0, y: 100 });
+            resetEntityVisualsAndPhysics(enemy, ENEMY_STATS, { x: 0, y: -100 });
+        }
+    }
 
     // Ensure bodies are in world (safe add)
     Composite.remove(engine.world, player.body);
@@ -1674,6 +2143,64 @@ function resetMatch() {
     guideMesh.visible = true;
 }
 
+function showResetDialog() {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+
+    const content = document.createElement('div');
+    content.className = 'modal-content';
+    content.style.maxWidth = '400px';
+
+    const header = document.createElement('div');
+    header.className = 'modal-header';
+    header.innerHTML = `<span class="modal-title">Reset Match</span>`;
+    content.appendChild(header);
+
+    const messageDiv = document.createElement('div');
+    messageDiv.style.padding = '20px';
+    messageDiv.style.lineHeight = '1.5';
+    messageDiv.innerText = 'Do you want to keep the power-ups applied?';
+    content.appendChild(messageDiv);
+
+    const actions = document.createElement('div');
+    actions.className = 'preset-actions';
+    actions.style.flexDirection = 'column';
+    actions.style.gap = '10px';
+
+    const keepBtn = document.createElement('button');
+    keepBtn.className = 'action-btn save';
+    keepBtn.innerText = 'Keep Power Ups';
+    keepBtn.style.width = '100%';
+    keepBtn.onclick = () => {
+        uiContainer.removeChild(overlay);
+        resetMatch(true);
+    };
+    actions.appendChild(keepBtn);
+
+    const fullResetBtn = document.createElement('button');
+    fullResetBtn.className = 'action-btn';
+    fullResetBtn.innerText = 'Discard Power Ups';
+    fullResetBtn.style.width = '100%';
+    fullResetBtn.onclick = () => {
+        uiContainer.removeChild(overlay);
+        resetMatch(false);
+    };
+    actions.appendChild(fullResetBtn);
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'action-btn reset';
+    cancelBtn.innerText = 'Cancel';
+    cancelBtn.style.width = '100%';
+    cancelBtn.onclick = () => {
+        uiContainer.removeChild(overlay);
+    };
+    actions.appendChild(cancelBtn);
+
+    content.appendChild(actions);
+    overlay.appendChild(content);
+    uiContainer.appendChild(overlay);
+}
+
 // Reset Key
 window.addEventListener('keydown', (e) => {
     if (e.key === 'r' || e.key === 'R') {
@@ -1681,6 +2208,8 @@ window.addEventListener('keydown', (e) => {
         if (overlay && overlay.parentNode) {
             overlay.parentNode.removeChild(overlay);
         }
-        resetMatch();
+        if (hasLaunched) {
+            showResetDialog();
+        }
     }
 });

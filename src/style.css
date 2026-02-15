@@ -293,16 +293,6 @@ button:active {
   }
 }
 
-/* Reset Hint */
-.reset-btn {
-  position: absolute;
-  bottom: 20px;
-  left: 20px;
-  color: var(--text-color);
-  font-family: var(--font-stack);
-  font-size: 0.9em;
-  display: none;
-}
 
 /* --- Launch Button Styles */
 .launch-btn {
@@ -573,4 +563,120 @@ button:active {
   color: var(--text-color);
   box-shadow: 6px 6px 0px var(--primary-color);
   outline-color: var(--primary-color);
+}
+
+/* --- Action HUD (Pool + Reset buttons) --- */
+.action-hud {
+  position: absolute;
+  top: 90px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  z-index: 100;
+  pointer-events: auto;
+}
+
+.action-hud-btn {
+  padding: 6px 12px;
+  font-size: 0.75em;
+}
+
+/* --- Power-Up System --- */
+.powerup-container {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  left: 20px;
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  z-index: 100;
+  pointer-events: auto;
+}
+
+.powerup-card {
+  background: var(--bg-color);
+  border: var(--border-width) solid var(--border-color);
+  box-shadow: 4px 4px 0px var(--border-color);
+  padding: 15px 10px;
+  width: 160px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  position: relative;
+  transition: none;
+}
+
+.powerup-card:hover {
+  box-shadow: 6px 6px 0px var(--primary-color);
+  background: var(--text-color);
+  color: var(--bg-color);
+}
+
+.powerup-card:hover .powerup-detail,
+.powerup-card:hover .powerup-key {
+  color: var(--bg-color);
+}
+
+.powerup-card.selected {
+  background: var(--text-color);
+  color: var(--bg-color);
+  border-color: var(--primary-color);
+  box-shadow: 6px 6px 0px var(--primary-color);
+}
+
+.powerup-card.selected .powerup-detail,
+.powerup-card.selected .powerup-key {
+  color: var(--bg-color);
+}
+
+.powerup-label {
+  font-weight: bold;
+  font-size: 0.9em;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  line-height: 1.2;
+}
+
+.powerup-detail {
+  font-size: 0.65em;
+  color: var(--primary-color);
+  text-transform: uppercase;
+}
+
+.powerup-key {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  font-size: 0.7em;
+  font-weight: bold;
+  color: var(--primary-color);
+  border: 1px solid var(--primary-color);
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 600px) {
+  .powerup-container {
+    bottom: 10px;
+    right: 10px;
+    left: 10px;
+    gap: 5px;
+    flex-direction: row;
+    justify-content: space-between;
+  }
+
+  .powerup-card {
+    width: 120px;
+    padding: 10px 8px;
+  }
+
+  .powerup-label {
+    font-size: 0.75em;
+  }
 }
