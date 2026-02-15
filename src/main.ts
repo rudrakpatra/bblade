@@ -563,7 +563,7 @@ const POWERUP_TYPES: PowerUp[] = [
     {
         id: 'atk_boost',
         label: 'ATK +5',
-        detail: 'Increased Damage',
+        detail: 'Increased Dmg',
         apply: (entity) => {
             if (entity.stats) entity.stats.atk += 5;
         }
@@ -571,7 +571,7 @@ const POWERUP_TYPES: PowerUp[] = [
     {
         id: 'def_boost',
         label: 'DEF +5',
-        detail: 'Reduced Damage',
+        detail: 'Reduced Dmg',
         apply: (entity) => {
             if (entity.stats) entity.stats.def += 5;
         }
@@ -633,7 +633,7 @@ const POWERUP_TYPES: PowerUp[] = [
     {
         id: 'curl_increase',
         label: 'CURL High',
-        detail: 'Tangential',
+        detail: 'curl=10',
         apply: (entity) => {
             if (entity.stats) entity.stats.curlForce = 10;
         }
@@ -641,7 +641,7 @@ const POWERUP_TYPES: PowerUp[] = [
     {
         id: 'curl_decrease',
         label: 'CURL Low',
-        detail: 'Tangential',
+        detail: 'curl=1',
         apply: (entity) => {
             if (entity.stats) entity.stats.curlForce = 1;
         }
@@ -908,7 +908,7 @@ actionHud.appendChild(poolBtn);
 const resetHint = document.createElement('button');
 resetHint.className = 'action-hud-btn';
 resetHint.innerText = 'RESET';
-resetHint.onclick = showResetDialog;
+resetHint.onclick = () => showResetDialog(true);
 resetHint.style.display = 'none';
 actionHud.appendChild(resetHint);
 
@@ -2026,7 +2026,7 @@ function showWinner(text: string) {
     rematchBtn.innerText = 'REMATCH';
     rematchBtn.onclick = () => {
         document.body.removeChild(overlay);
-        showResetDialog();
+        showResetDialog(false);
     };
     overlay.appendChild(rematchBtn);
 
@@ -2143,7 +2143,7 @@ function resetMatch(keepPowerups: boolean = false) {
     guideMesh.visible = true;
 }
 
-function showResetDialog() {
+function showResetDialog(showCancel: boolean = true) {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
 
@@ -2187,14 +2187,17 @@ function showResetDialog() {
     };
     actions.appendChild(fullResetBtn);
 
-    const cancelBtn = document.createElement('button');
-    cancelBtn.className = 'action-btn reset';
-    cancelBtn.innerText = 'Cancel';
-    cancelBtn.style.width = '100%';
-    cancelBtn.onclick = () => {
-        uiContainer.removeChild(overlay);
-    };
-    actions.appendChild(cancelBtn);
+    // Only show Cancel button if showCancel is true
+    if (showCancel) {
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'action-btn reset';
+        cancelBtn.innerText = 'Cancel';
+        cancelBtn.style.width = '100%';
+        cancelBtn.onclick = () => {
+            uiContainer.removeChild(overlay);
+        };
+        actions.appendChild(cancelBtn);
+    }
 
     content.appendChild(actions);
     overlay.appendChild(content);
@@ -2209,7 +2212,7 @@ window.addEventListener('keydown', (e) => {
             overlay.parentNode.removeChild(overlay);
         }
         if (hasLaunched) {
-            showResetDialog();
+            showResetDialog(true);
         }
     }
 });
