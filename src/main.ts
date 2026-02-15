@@ -291,7 +291,7 @@ scene.add(dirLight);
 // --- Game Constants ---
 const ARENA_RADIUS = 300;
 const BEYBLADE_RADIUS = 30; // Physics radius
-const DISH_FORCE = 0.00002;
+const FORCE_CONSTANT = 0.00002;
 
 // Helper function for Bowl Shape
 // y = (r / R)^2 * MaxH
@@ -560,7 +560,7 @@ const PLAYER_STATS: BeybladeStats = {
     densityBase: 0.05,
     // Arena Forces
     dishForce: 1.0,  // Normal dish effect
-    curlForce: 10.5,  // Moderate curl
+    curlForce: 2.5,  // Moderate curl
     // Visuals (Blue Theme)
     beyScale: 1.0,
     wheelColor: 0x888888,
@@ -579,7 +579,7 @@ const ENEMY_STATS: BeybladeStats = {
     maxRpm: 1000,
     atk: 80,
     def: 50,
-    wt: 0.2,
+    wt: 0.75,
     sta: 15,
     spd: 100,
     spl: 0,
@@ -726,12 +726,14 @@ const PRESET_FIELDS = [
     { key: 'spd', label: 'SPD', hint: 'Launch Vel.', type: 'number', step: 10 },
     { key: 'atk', label: 'ATK', hint: 'Damage', type: 'number', step: 1 },
     { key: 'def', label: 'DEF', hint: 'Reduction', type: 'number', step: 1 },
-    { key: 'wt', label: 'WT', hint: 'Weight', type: 'number', step: 0.1 },
-    { key: 'sta', label: 'STA', hint: 'Endurance', type: 'number', step: 1 },
+    { key: 'wt', label: 'WT', hint: 'weight', type: 'number', step: 0.1 },
+    { key: 'sta', label: 'STA', hint: '-RPM/s', type: 'number', step: 1 },
     { key: 'crt', label: 'CRT', hint: 'Crit %', type: 'number', step: 0.05 },
-    { key: 'frictionAir', label: 'Drag', hint: 'Resistance', type: 'number', step: 0.001 },
-    { key: 'dishForce', label: 'DISH', hint: 'Radial Pull', type: 'number', step: 0.1 },
-    { key: 'curlForce', label: 'CURL', hint: 'Tangent Spin', type: 'number', step: 0.1 },
+    { key: 'restitution', label: 'BOUNCE', hint: 'restitution', type: 'number', step: 0.2 },
+    { key: 'friction', label: 'GRIP', hint: 'friction', type: 'number', step: 0.2 },
+    { key: 'frictionAir', label: 'DRAG', hint: 'air friction', type: 'number', step: 0.001 },
+    { key: 'dishForce', label: 'DISH', hint: 'radial', type: 'number', step: 0.1 },
+    { key: 'curlForce', label: 'CURL', hint: 'tangential', type: 'number', step: 0.1 },
 ];
 
 const VISUAL_FIELDS = [
@@ -1267,9 +1269,11 @@ function animate() {
                     const tangentX = radialY;
                     const tangentY = -radialX;
 
+                    if (entity.currentRpm === undefined) return;
+                    // const life = entity.currentRpm / entity.stats.maxRpm;
                     // Calculate force magnitudes
-                    const dishMagnitude = DISH_FORCE * entity.body.mass * dist * entity.stats.dishForce;
-                    const curlMagnitude = DISH_FORCE * entity.body.mass * entity.stats.curlForce;
+                    const dishMagnitude = FORCE_CONSTANT * entity.body.mass * dist * entity.stats.dishForce;
+                    const curlMagnitude = FORCE_CONSTANT * entity.body.mass * entity.stats.curlForce;
 
                     // Apply combined force
                     Body.applyForce(entity.body, entity.body.position, {
@@ -1619,6 +1623,13 @@ const resetEntityVisualsAndPhysics = (entity: GameEntity, stats: BeybladeStats, 
     Body.setAngularVelocity(entity.body, 0);
     Body.setAngle(entity.body, 0);
 
+    // Clear all forces and torques
+    entity.body.force = { x: 0, y: 0 };
+    entity.body.torque = 0;
+
+    // Wake the body to ensure physics updates, then it will settle
+    Body.setStatic(entity.body, false);
+
     // Reset Visual Position
     entity.mesh.position.set(startPos.x, getArenaHeight(startPos.x, startPos.y) + 10, startPos.y); // Matter Y is Three Z
     entity.mesh.quaternion.set(0, 0, 0, 1);
@@ -1633,6 +1644,10 @@ const resetEntityVisualsAndPhysics = (entity: GameEntity, stats: BeybladeStats, 
     entity.stats = stats; // Ensure reference is up to date
     entity.isDead = false;
     entity.currentRpm = 0;
+
+    // 6. Clear drift properties (prevents weird movement after reset)
+    entity.driftVelocity = undefined;
+    entity.driftRotation = undefined;
 };
 
 function resetMatch() {
