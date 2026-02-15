@@ -512,6 +512,9 @@ interface BeybladeStats {
     restitution: number;
     friction: number;
     densityBase: number;
+    // Arena Forces
+    dishForce: number;  // Multiplier for radial force toward center
+    curlForce: number;  // Multiplier for tangential clockwise force
     // Visual Stats
     beyScale: number;
     wheelColor: number;
@@ -555,6 +558,9 @@ const PLAYER_STATS: BeybladeStats = {
     friction: 0.2,
     frictionAir: 0.005,
     densityBase: 0.05,
+    // Arena Forces
+    dishForce: 1.0,  // Normal dish effect
+    curlForce: 10.5,  // Moderate curl
     // Visuals (Blue Theme)
     beyScale: 1.0,
     wheelColor: 0x888888,
@@ -582,6 +588,9 @@ const ENEMY_STATS: BeybladeStats = {
     friction: 0.2,
     frictionAir: 0.005,
     densityBase: 0.05,
+    // Arena Forces
+    dishForce: 1.0,  // Normal dish effect
+    curlForce: 0,  // Lower curl for defense
     // Visuals (Orange Theme)
     beyScale: 1.0,
     wheelColor: 0x888888,
@@ -612,22 +621,11 @@ function loadPresets() {
     if (eData) Object.assign(ENEMY_STATS, JSON.parse(eData));
 }
 
-// function resetPresets() {
-//     localStorage.removeItem('bblade_player_stats');
-//     localStorage.removeItem('bblade_enemy_stats');
-//     Object.assign(PLAYER_STATS, DEFAULT_PLAYER_STATS);
-//     Object.assign(ENEMY_STATS, DEFAULT_ENEMY_STATS);
-//     console.log('Presets Reset to Defaults!');
-// }
-
 // Load on Startup
 loadPresets();
 
 
 function createBeyblade(x: number, y: number, stats: BeybladeStats): GameEntity {
-    // Physics Body - Mass derived from stats.wt
-    // Physics Body - Mass derived from stats.wt and config density
-    // Physics Body - Mass derived from stats.wt and config density
     const density = stats.densityBase * stats.wt;
 
     const body = Bodies.circle(x, y, BEYBLADE_RADIUS, {
@@ -725,13 +723,15 @@ setTimeout(() => {
 
 const PRESET_FIELDS = [
     { key: 'maxRpm', label: 'RPM', hint: 'Spin Speed', type: 'number', step: 10 },
-    { key: 'spd', label: 'SPD', hint: 'Launch Velocity', type: 'number', step: 10 },
+    { key: 'spd', label: 'SPD', hint: 'Launch Vel.', type: 'number', step: 10 },
     { key: 'atk', label: 'ATK', hint: 'Damage', type: 'number', step: 1 },
     { key: 'def', label: 'DEF', hint: 'Reduction', type: 'number', step: 1 },
     { key: 'wt', label: 'WT', hint: 'Weight', type: 'number', step: 0.1 },
     { key: 'sta', label: 'STA', hint: 'Endurance', type: 'number', step: 1 },
     { key: 'crt', label: 'CRT', hint: 'Crit %', type: 'number', step: 0.05 },
     { key: 'frictionAir', label: 'Drag', hint: 'Resistance', type: 'number', step: 0.001 },
+    { key: 'dishForce', label: 'DISH', hint: 'Radial Pull', type: 'number', step: 0.1 },
+    { key: 'curlForce', label: 'CURL', hint: 'Tangent Spin', type: 'number', step: 0.1 },
 ];
 
 const VISUAL_FIELDS = [
@@ -776,6 +776,44 @@ function createInput(id: string, label: string, value: any, hint: string, type: 
 }
 
 // Preview Scene Helper
+// --- Preset Modal Preview System ---
+// WebGL Renderer Pool (max 3 contexts to prevent exhaustion)
+const rendererPool: THREE.WebGLRenderer[] = [];
+const MAX_RENDERERS = 3;
+
+function getOrCreateRenderer(): THREE.WebGLRenderer {
+    // Try to reuse an existing renderer
+    if (rendererPool.length > 0) {
+        return rendererPool.pop()!;
+    }
+
+    // Create new renderer if under limit
+    if (rendererPool.length < MAX_RENDERERS) {
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        return renderer;
+    }
+
+    // Fallback: create without adding to pool (shouldn't happen)
+    console.warn('Renderer pool exhausted, creating temporary renderer');
+    return new THREE.WebGLRenderer({ antialias: true, alpha: true });
+}
+
+function returnRenderer(renderer: THREE.WebGLRenderer) {
+    // Clear the renderer's DOM parent
+    if (renderer.domElement.parentNode) {
+        renderer.domElement.parentNode.removeChild(renderer.domElement);
+    }
+
+    // Return to pool if under limit
+    if (rendererPool.length < MAX_RENDERERS) {
+        rendererPool.push(renderer);
+    } else {
+        // Dispose if pool is full
+        renderer.dispose();
+    }
+}
+
 let previewRenderer: THREE.WebGLRenderer | null = null;
 let previewScene: THREE.Scene | null = null;
 let previewCamera: THREE.PerspectiveCamera | null = null;
@@ -810,7 +848,7 @@ function openPresetsModal(targetStats: BeybladeStats, targetName: string) {
     closeBtn.onclick = () => {
         uiContainer.removeChild(overlay);
         if (previewRenderer) {
-            previewRenderer.dispose();
+            returnRenderer(previewRenderer); // Return to pool
             previewRenderer = null;
         }
         if (previewControls) {
@@ -859,8 +897,8 @@ function openPresetsModal(targetStats: BeybladeStats, targetName: string) {
         const width = previewContainer.clientWidth;
         const height = previewContainer.clientHeight;
 
-        previewRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-        previewRenderer.setPixelRatio(window.devicePixelRatio);
+        // Get renderer from pool instead of creating new one
+        previewRenderer = getOrCreateRenderer();
         previewRenderer.setSize(width, height);
         previewRenderer.setClearColor(0x000000, 0);
         previewContainer.appendChild(previewRenderer.domElement);
@@ -938,11 +976,12 @@ function openPresetsModal(targetStats: BeybladeStats, targetName: string) {
                 if (targetName === 'Player') Object.assign(PLAYER_STATS, DEFAULT_PLAYER_STATS);
                 if (targetName === 'CPU') Object.assign(ENEMY_STATS, DEFAULT_ENEMY_STATS);
 
+
                 savePresets(); // Persist the reset
 
                 uiContainer.removeChild(overlay);
                 if (previewRenderer) {
-                    previewRenderer.dispose();
+                    returnRenderer(previewRenderer); // Return to pool
                     previewRenderer = null;
                 }
                 resetMatch(); // Apply visual reset immediately
@@ -960,7 +999,7 @@ function openPresetsModal(targetStats: BeybladeStats, targetName: string) {
         savePresets(); // Save everything
         uiContainer.removeChild(overlay);
         if (previewRenderer) {
-            previewRenderer.dispose();
+            returnRenderer(previewRenderer); // Return to pool
             previewRenderer = null;
         }
         resetMatch();
@@ -968,13 +1007,24 @@ function openPresetsModal(targetStats: BeybladeStats, targetName: string) {
     actions.appendChild(saveBtn);
     content.appendChild(actions);
 
+    // Close on overlay background click
+    overlay.onclick = (e) => {
+        if (e.target === overlay) {
+            uiContainer.removeChild(overlay);
+            if (previewRenderer) {
+                returnRenderer(previewRenderer); // Return to pool
+                previewRenderer = null;
+            }
+            if (previewControls) {
+                previewControls.dispose();
+                previewControls = null;
+            }
+        }
+    };
+
     overlay.appendChild(content);
     uiContainer.appendChild(overlay);
 }
-
-// Remove old listener assignment if exists
-// presetsBtn.onclick = openPresetsModal; 
-
 
 // Custom Confirm Dialog
 function showConfirmDialog(title: string, message: string, onConfirm: () => void) {
@@ -1048,7 +1098,6 @@ const sparkGeo = new THREE.BoxGeometry(3, 3, 3); // Bigger sparks
 function createSpark(x: number, y: number, color: number, speedVal: number) {
     const material = new THREE.MeshBasicMaterial({
         color: color,
-        // side: THREE.DoubleSide, // Not needed for Box
         transparent: true
     });
     const mesh = new THREE.Mesh(sparkGeo, material);
@@ -1203,14 +1252,31 @@ function animate() {
             entities.forEach(entity => {
                 if (entity.isDead) return; // Skip physics forces for dead entities
 
-                // Dish Effect: Push towards center (0,0)
-                const dx = 0 - entity.body.position.x;
-                const dy = 0 - entity.body.position.y;
-                const forceMagnitude = DISH_FORCE * entity.body.mass;
-                Body.applyForce(entity.body, entity.body.position, {
-                    x: dx * forceMagnitude,
-                    y: dy * forceMagnitude
-                });
+                // Beyblade-Specific Forces (Dish + Curl)
+                if (entity.stats) {
+                    const px = entity.body.position.x;
+                    const py = entity.body.position.y;
+                    const dist = Math.sqrt(px * px + py * py);
+                    // if (dist == 0) return;
+                    // Normalized radial direction (toward center)
+                    const radialX = -px / dist;
+                    const radialY = -py / dist;
+
+                    // Tangent direction (perpendicular, clockwise)
+                    // Rotate radial 90° clockwise: (x, y) -> (y, -x)
+                    const tangentX = radialY;
+                    const tangentY = -radialX;
+
+                    // Calculate force magnitudes
+                    const dishMagnitude = DISH_FORCE * entity.body.mass * dist * entity.stats.dishForce;
+                    const curlMagnitude = DISH_FORCE * entity.body.mass * entity.stats.curlForce;
+
+                    // Apply combined force
+                    Body.applyForce(entity.body, entity.body.position, {
+                        x: radialX * dishMagnitude + tangentX * curlMagnitude,
+                        y: radialY * dishMagnitude + tangentY * curlMagnitude
+                    });
+                }
             });
         }
     }
