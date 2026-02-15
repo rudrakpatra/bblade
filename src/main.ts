@@ -589,7 +589,7 @@ const POWERUP_TYPES: PowerUp[] = [
         label: 'CRT% +5',
         detail: 'Crit% +=5',
         apply: (entity) => {
-            if (entity.stats) entity.stats.crt += 5;
+            if (entity.stats) entity.stats.crt += 0.05;
         }
     },
     {
