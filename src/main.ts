@@ -586,10 +586,10 @@ const POWERUP_TYPES: PowerUp[] = [
     },
     {
         id: 'crit_boost',
-        label: 'CRT +5%',
-        detail: 'Crit Chance',
+        label: 'CRT% +5',
+        detail: 'Crit% +=5',
         apply: (entity) => {
-            if (entity.stats) entity.stats.crt *= 1.05;
+            if (entity.stats) entity.stats.crt += 5;
         }
     },
     {
