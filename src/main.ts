@@ -504,10 +504,11 @@ interface BeybladeStats {
     sta: number;
     spd: number;
     spl: number;
-    crt: number;
+    crtAtk: number; // Critical Damage Value (Guaranteed above threshold)
     frictionAir: number;
     restitution: number;
     friction: number;
+
     densityBase: number;
     // Arena Forces
     dishForce: number;  // Multiplier for radial force toward center
@@ -541,159 +542,38 @@ interface GameEntity {
 }
 const entities: GameEntity[] = [];
 
-// --- Power-Up System ---
-interface PowerUp {
-    id: string;
-    label: string;
-    detail: string;
-    apply: (entity: GameEntity) => void;
-}
-
+// Physics Constants
 // Physics Constants
 const FRICTION_LOW = 0.02;
-const FRICTION_HIGH = 0.1;
+const FRICTION_HIGH = 0.1; // High Drag
 
-const DISH_LOW = 2;
+const CRIT_SPEED_THRESHOLD = 20;
+const BARRIER_DAMAGE = 20; // Self-damage when hitting walls
+
+
+
+const DISH_LOW = 1;
 const DISH_HIGH = 5;
 
 const CURL_LOW = 1;
-const CURL_HIGH = 50;
+const CURL_HIGH = 100;
 
-// Power-Up Type Definitions
-const POWERUP_TYPES: PowerUp[] = [
-    {
-        id: 'atk_boost',
-        label: 'ATK +2',
-        detail: 'Increased Dmg',
-        apply: (entity) => {
-            if (entity.stats) entity.stats.atk += 2;
-        }
-    },
-    {
-        id: 'def_boost',
-        label: 'DEF +2',
-        detail: 'Reduced Dmg',
-        apply: (entity) => {
-            if (entity.stats) entity.stats.def += 2;
-        }
-    },
-    {
-        id: 'sta_drain',
-        label: 'DECAY -5%',
-        detail: 'Decay Rate',
-        apply: (entity) => {
-            if (entity.stats) entity.stats.sta *= 0.95;
-        }
-    },
-    {
-        id: 'crit_boost',
-        label: 'CRT% +5',
-        detail: 'Crit% +=5',
-        apply: (entity) => {
-            if (entity.stats) entity.stats.crt += 0.05;
-        }
-    },
-    {
-        id: 'swap_drag',
-        label: 'Swap D',
-        detail: 'Drag',
-        apply: (entity) => {
-            if (entity.stats) {
-                entity.stats.frictionAir = (entity.stats.frictionAir !== FRICTION_LOW) ? FRICTION_LOW : FRICTION_HIGH;
-                entity.body.frictionAir = entity.stats.frictionAir;
-            }
-        }
-    },
-    {
-        id: 'swap_radial',
-        label: 'Swap R',
-        detail: 'Radial',
-        apply: (entity) => {
-            if (entity.stats) {
-                entity.stats.dishForce = (entity.stats.dishForce !== DISH_LOW) ? DISH_LOW : DISH_HIGH;
-            }
-        }
-    },
-    {
-        id: 'swap_tangent',
-        label: 'Swap T',
-        detail: 'Tangential',
-        apply: (entity) => {
-            if (entity.stats) {
-                entity.stats.curlForce = (entity.stats.curlForce !== CURL_LOW) ? CURL_LOW : CURL_HIGH;
-            }
-        }
-    }
+// Patterns
+interface PhysicsPattern {
+    name: string;
+    dish: number;
+    curl: number;
+    drag: number;
+}
+
+const PATTERNS: PhysicsPattern[] = [
+    { name: 'EDGE', dish: DISH_LOW, curl: CURL_HIGH, drag: FRICTION_LOW }, // Aggressive Center (High Curl = Edge/Orbit)
+    { name: 'CENTER', dish: DISH_HIGH, curl: CURL_LOW, drag: FRICTION_HIGH }, // Heavy/Stable (High Dish = Center)
 ];
 
-// Power-Up Pool Configuration (default counts)
-interface PoolConfig {
-    [key: string]: number;
-}
+let currentPatternIndex = 0;
 
-const DEFAULT_POOL_CONFIG: PoolConfig = {
-    'atk_boost': 3,
-    'def_boost': 3,
-    'sta_drain': 2,
-    'crit_boost': 2,
-    'swap_drag': 4,
-    'swap_radial': 4,
-    'swap_tangent': 4
-};
 
-class PowerUpPool {
-    private pool: PowerUp[] = [];
-    private config: PoolConfig;
-
-    constructor(config: PoolConfig = DEFAULT_POOL_CONFIG) {
-        this.config = { ...config };
-        this.initialize();
-    }
-
-    initialize() {
-        this.pool = [];
-        for (const powerup of POWERUP_TYPES) {
-            const count = this.config[powerup.id] || 0;
-            for (let i = 0; i < count; i++) {
-                this.pool.push(powerup);
-            }
-        }
-        // Shuffle pool
-        for (let i = this.pool.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [this.pool[i], this.pool[j]] = [this.pool[j], this.pool[i]];
-        }
-    }
-
-    draw(count: number): PowerUp[] {
-        const drawn: PowerUp[] = [];
-        for (let i = 0; i < count && this.pool.length > 0; i++) {
-            const index = Math.floor(Math.random() * this.pool.length);
-            drawn.push(this.pool[index]);
-            // Don't remove yet - only remove when selected
-        }
-        return drawn;
-    }
-
-    remove(powerup: PowerUp) {
-        const index = this.pool.findIndex(p => p.id === powerup.id);
-        if (index !== -1) {
-            this.pool.splice(index, 1);
-        }
-    }
-
-    updateConfig(newConfig: PoolConfig) {
-        this.config = { ...newConfig };
-        this.initialize();
-    }
-
-    getRemaining(): number {
-        return this.pool.length;
-    }
-}
-
-// Global pool instance
-let powerUpPool = new PowerUpPool();
 
 // Stats Presets
 const PLAYER_STATS: BeybladeStats = {
@@ -704,7 +584,7 @@ const PLAYER_STATS: BeybladeStats = {
     sta: 1,
     spd: 60,
     spl: 0,
-    crt: 0.2,
+    crtAtk: 20, // Critical Damage
     restitution: 0.1,
     friction: 0.2,
     frictionAir: FRICTION_LOW,
@@ -734,7 +614,7 @@ const ENEMY_STATS: BeybladeStats = {
     sta: 1,
     spd: 60,
     spl: 0,
-    crt: 0.2,
+    crtAtk: 20, // Critical Damage
     restitution: 0.1,
     friction: 0.2,
     frictionAir: FRICTION_LOW,
@@ -755,16 +635,6 @@ const ENEMY_STATS: BeybladeStats = {
     tipColor: 0x333333,
     tipSize: 1.0
 };
-
-const DEFAULT_PLAYER_STATS = { ...PLAYER_STATS };
-const DEFAULT_ENEMY_STATS = { ...ENEMY_STATS };
-
-function savePresets() {
-    console.log("Saving presets", PLAYER_STATS, ENEMY_STATS);
-    localStorage.setItem('bblade_player_stats', JSON.stringify(PLAYER_STATS));
-    localStorage.setItem('bblade_enemy_stats', JSON.stringify(ENEMY_STATS));
-    console.log('Presets Saved!');
-}
 
 function loadPresets() {
     const pData = localStorage.getItem('bblade_player_stats');
@@ -873,668 +743,76 @@ const actionHud = document.createElement('div');
 actionHud.id = 'action-hud';
 actionHud.className = 'action-hud';
 
-const poolBtn = document.createElement('button');
-poolBtn.className = 'action-hud-btn';
-poolBtn.innerText = 'POOL';
-poolBtn.onclick = () => openPoolEditor();
-actionHud.appendChild(poolBtn);
-
 const resetHint = document.createElement('button');
 resetHint.className = 'action-hud-btn';
 resetHint.innerText = 'RESET';
-resetHint.onclick = () => showResetDialog(true);
+resetHint.onclick = () => resetMatch();
 resetHint.style.display = 'none';
 actionHud.appendChild(resetHint);
 
 uiContainer.appendChild(actionHud);
 
-// Presets Button Trigger Logic
-setTimeout(() => {
-    const p1Btn = document.getElementById('p1-btn');
-    const cpuBtn = document.getElementById('cpu-btn');
 
-    if (p1Btn) p1Btn.onclick = () => openPresetsModal(PLAYER_STATS, 'Player');
-    if (cpuBtn) cpuBtn.onclick = () => openPresetsModal(ENEMY_STATS, 'CPU');
-}, 0);
 
-const PRESET_FIELDS = [
-    { key: 'maxRpm', label: 'RPM', hint: 'Spin Speed', type: 'number', step: 10 },
-    { key: 'spd', label: 'SPD', hint: 'Launch Vel.', type: 'number', step: 10 },
-    { key: 'atk', label: 'ATK', hint: 'Damage', type: 'number', step: 1 },
-    { key: 'def', label: 'DEF', hint: 'Reduction', type: 'number', step: 1 },
-    { key: 'wt', label: 'WT', hint: 'weight', type: 'number', step: 0.1 },
-    { key: 'sta', label: 'STA', hint: '-RPM/s', type: 'number', step: 1 },
-    { key: 'crt', label: 'CRT', hint: 'Crit %', type: 'number', step: 0.05 },
-    { key: 'restitution', label: 'BOUNCE', hint: 'restitution', type: 'number', step: 0.2 },
-    { key: 'friction', label: 'GRIP', hint: 'friction', type: 'number', step: 0.2 },
-    { key: 'frictionAir', label: 'DRAG', hint: 'air friction', type: 'number', step: 0.001 },
-    { key: 'dishForce', label: 'DISH', hint: 'radial', type: 'number', step: 0.1 },
-    { key: 'curlForce', label: 'CURL', hint: 'tangential', type: 'number', step: 0.1 },
-];
 
-const VISUAL_FIELDS = [
-    { key: 'beyScale', label: 'BEY SIZE', hint: 'Scale', type: 'number', step: 0.1 },
-    { key: 'wheelColor', label: 'WHEEL COLOR', hint: 'Metal color', type: 'color' },
-    { key: 'ringColor', label: 'RING COLOR', hint: 'Energy color', type: 'color' },
-    { key: 'ringRadiusFactor', label: 'RING RADIUS', hint: 'Size factor', type: 'number', step: 0.05 },
-    { key: 'ringSides', label: 'RING SIDES', hint: 'Shape sides', type: 'number', step: 1 },
-    { key: 'boltColor', label: 'BOLT COLOR', hint: 'Face color', type: 'color' },
-    { key: 'boltSides', label: 'BOLT SIDES', hint: 'Hex/Circle', type: 'number', step: 1 },
-    { key: 'spinTrackColor', label: 'ST COLOR', hint: 'Track color', type: 'color' },
-    { key: 'spinTrackSize', label: 'ST SIZE', hint: 'Track depth', type: 'number', step: 0.1 },
-    { key: 'tipColor', label: 'TIP COLOR', hint: 'Base color', type: 'color' },
-    { key: 'tipSize', label: 'TIP SIZE', hint: 'Radius', type: 'number', step: 0.1 },
-];
+// --- Cycle Button ---
+const cycleBtnContainer = document.createElement('div');
+cycleBtnContainer.className = 'cycle-container';
+cycleBtnContainer.style.display = 'none'; // Hidden initially
+uiContainer.appendChild(cycleBtnContainer);
 
-function createInput(id: string, label: string, value: any, hint: string, type: string, step: number | string, onChange: (val: any) => void) {
-    const div = document.createElement('div');
-    div.className = 'stat-item';
-
-    // Handle color values (hex num to #hex str)
-    let displayValue = value;
-    if (type === 'color') {
-        displayValue = '#' + value.toString(16).padStart(6, '0');
-    }
-
-    div.innerHTML = `
-        <label class="stat-label" for="${id}">${label}</label>
-        <input class="stat-input" type="${type}" ${type === 'number' ? `step="${step}"` : ''} id="${id}" value="${displayValue}">
-        <span class="stat-hint">${hint}</span>
-    `;
-
-    const input = div.querySelector('input')!;
-    input.addEventListener('input', (e) => {
-        let val: any = (e.target as HTMLInputElement).value;
-        if (type === 'number') val = parseFloat(val);
-        if (type === 'color') val = parseInt(val.replace('#', ''), 16);
-        onChange(val);
-    });
-
-    return div;
-}
-
-// Preview Scene Helper
-// --- Preset Modal Preview System ---
-// WebGL Renderer Pool (max 3 contexts to prevent exhaustion)
-const rendererPool: THREE.WebGLRenderer[] = [];
-const MAX_RENDERERS = 3;
-
-function getOrCreateRenderer(): THREE.WebGLRenderer {
-    // Try to reuse an existing renderer
-    if (rendererPool.length > 0) {
-        return rendererPool.pop()!;
-    }
-
-    // Create new renderer if under limit
-    if (rendererPool.length < MAX_RENDERERS) {
-        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-        renderer.setPixelRatio(window.devicePixelRatio);
-        return renderer;
-    }
-
-    // Fallback: create without adding to pool (shouldn't happen)
-    console.warn('Renderer pool exhausted, creating temporary renderer');
-    return new THREE.WebGLRenderer({ antialias: true, alpha: true });
-}
-
-function returnRenderer(renderer: THREE.WebGLRenderer) {
-    // Clear the renderer's DOM parent
-    if (renderer.domElement.parentNode) {
-        renderer.domElement.parentNode.removeChild(renderer.domElement);
-    }
-
-    // Return to pool if under limit
-    if (rendererPool.length < MAX_RENDERERS) {
-        rendererPool.push(renderer);
-    } else {
-        // Dispose if pool is full
-        renderer.dispose();
+function updatePhysicsFromPattern() {
+    const p = PATTERNS[currentPatternIndex];
+    if (player.stats) {
+        player.stats.dishForce = p.dish;
+        player.stats.curlForce = p.curl;
+        // FrictionAir is drag
+        player.body.frictionAir = p.drag;
+        player.stats.frictionAir = p.drag;
     }
 }
 
-let previewRenderer: THREE.WebGLRenderer | null = null;
-let previewScene: THREE.Scene | null = null;
-let previewCamera: THREE.PerspectiveCamera | null = null;
-let previewBeyblade: { mesh: THREE.Group, tiltGroup: THREE.Group, spinGroup: THREE.Group } | null = null;
-
-function updatePreview(stats: BeybladeStats) {
-    if (!previewScene) return;
-    if (previewBeyblade) {
-        previewScene.remove(previewBeyblade.mesh);
-    }
-    previewBeyblade = createBeybladeMesh(stats);
-    previewScene.add(previewBeyblade.mesh);
-}
-
-function openPresetsModal(targetStats: BeybladeStats, targetName: string) {
-    let previewControls: OrbitControls | null = null;
-    // Create a working copy of stats so we don't apply immediately
-    const tempStats = { ...targetStats };
-
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-
-    const content = document.createElement('div');
-    content.className = 'modal-content';
-
-    const header = document.createElement('div');
-    header.className = 'modal-header';
-    header.innerHTML = `<span class="modal-title">Customise ${targetName} Beyblade</span>`;
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'modal-close';
-    closeBtn.innerText = '×';
-    closeBtn.onclick = () => {
-        uiContainer.removeChild(overlay);
-        if (previewRenderer) {
-            returnRenderer(previewRenderer); // Return to pool
-            previewRenderer = null;
-        }
-        if (previewControls) {
-            previewControls.dispose();
-            previewControls = null;
-        }
-    };
-    header.appendChild(closeBtn);
-    content.appendChild(header);
-
-    // --- Visual Forge Section (Compact & Wrapped) ---
-    const vSection = document.createElement('div');
-    vSection.className = 'stat-section';
-    vSection.innerHTML = `<div class="section-title">Visual Forge</div>`;
-
-    const vContainer = document.createElement('div');
-    vContainer.className = 'forge-container';
-    vSection.appendChild(vContainer);
-
-    // 1. Preview (Floated Left)
-    const previewContainer = document.createElement('div');
-    previewContainer.className = 'preview-float';
-    vContainer.appendChild(previewContainer);
-
-    VISUAL_FIELDS.forEach(field => {
-        // Custom compact input creation
-        const div = createInput(
-            `v-${field.key}`,
-            field.label,
-            (targetStats as any)[field.key], // Use targetStats for initial display
-            field.hint,
-            field.type,
-            field.step || 1,
-            (val) => {
-                (tempStats as any)[field.key] = val;
-                updatePreview(tempStats);
-            }
-        );
-        div.className = 'stat-item'; // Override class for compact flow
-        vContainer.appendChild(div);
-    });
-    content.appendChild(vSection);
-
-    // Setup Preview Scene
-    setTimeout(() => {
-        const width = previewContainer.clientWidth;
-        const height = previewContainer.clientHeight;
-
-        // Get renderer from pool instead of creating new one
-        previewRenderer = getOrCreateRenderer();
-        previewRenderer.setSize(width, height);
-        previewRenderer.setClearColor(0x000000, 0);
-        previewContainer.appendChild(previewRenderer.domElement);
-
-        previewScene = new THREE.Scene();
-        previewCamera = new THREE.PerspectiveCamera(50, width / height, 1, 1000);
-        previewCamera.position.set(0, 40, 60);
-        previewCamera.lookAt(0, 5, 0);
-
-        // Orbit Controls for Preview
-        previewControls = new OrbitControls(previewCamera, previewRenderer.domElement);
-
-        // Lights
-        const ambient = new THREE.AmbientLight(0xffffff, 2);
-        previewScene.add(ambient);
-        const dir = new THREE.DirectionalLight(0xffffff, 3);
-        dir.position.set(10, 50, 20);
-        previewScene.add(dir);
-
-        updatePreview(tempStats);
-
-        function animatePreview() {
-            if (!previewRenderer) return;
-            requestAnimationFrame(animatePreview);
-
-            if (previewControls) previewControls.update();
-
-            // No auto spin/wobble as requested
-            // if (previewBeyblade) {
-            //     previewBeyblade.spinGroup.rotation.y += 0.1;
-            // }
-
-            previewRenderer.render(previewScene!, previewCamera!);
-        }
-        animatePreview();
-    }, 0);
 
 
-    // --- Combat Stats Section (Bottom) ---
-    const pSection = document.createElement('div');
-    pSection.className = 'stat-section';
-    pSection.innerHTML = `<div class="section-title">Combat Logic</div>`;
-    const pGrid = document.createElement('div');
-    pGrid.className = 'stat-grid';
-    PRESET_FIELDS.forEach(field => {
-        pGrid.appendChild(createInput(
-            `p-${field.key}`,
-            field.label,
-            (targetStats as any)[field.key], // Use targetStats for initial display
-            field.hint,
-            field.type || 'number',
-            field.step || 0.01,
-            (val) => {
-                (tempStats as any)[field.key] = val;
-            }
-        ));
-    });
-    pSection.appendChild(pGrid);
-    content.appendChild(pSection);
+const cycleBtn = document.createElement('button');
+cycleBtn.className = 'pattern-btn';
+currentPatternIndex = 0;
+cycleBtn.innerHTML = `
+    <span class="value">DIVE</span>
+`;
 
-    // Actions
-    const actions = document.createElement('div');
-    actions.className = 'preset-actions';
-
-    const resetBtn = document.createElement('button');
-    resetBtn.className = 'action-btn reset';
-    resetBtn.innerText = 'Reset Defaults';
-    resetBtn.style.marginRight = 'auto';
-    resetBtn.onclick = () => {
-        showConfirmDialog(
-            `Reset ${targetName} Beyblade?`,
-            `This will remove all customizations and restore default stats for ${targetName}. This action will clear saved data from local storage.`,
-            () => {
-                // Confirmed - Reset specific target
-                if (targetName === 'Player') Object.assign(PLAYER_STATS, DEFAULT_PLAYER_STATS);
-                if (targetName === 'CPU') Object.assign(ENEMY_STATS, DEFAULT_ENEMY_STATS);
-
-
-                savePresets(); // Persist the reset
-
-                uiContainer.removeChild(overlay);
-                if (previewRenderer) {
-                    returnRenderer(previewRenderer); // Return to pool
-                    previewRenderer = null;
-                }
-                resetMatch(); // Apply visual reset immediately
-            }
-        );
-    };
-    actions.appendChild(resetBtn);
-
-    const saveBtn = document.createElement('button');
-    saveBtn.className = 'action-btn save';
-    saveBtn.innerText = 'Save & Apply';
-    saveBtn.onclick = () => {
-        // Commit temp stats to actual target stats
-        Object.assign(targetStats, tempStats);
-        savePresets(); // Save everything
-        uiContainer.removeChild(overlay);
-        if (previewRenderer) {
-            returnRenderer(previewRenderer); // Return to pool
-            previewRenderer = null;
-        }
-
-        // Apply the updated stats by resetting entities with new stats
-        // This ensures visuals (colors, scale) and physics are all updated
-        if (!hasLaunched) {
-            // Reset entities with updated PLAYER_STATS/ENEMY_STATS
-            resetEntityVisualsAndPhysics(player, PLAYER_STATS, { x: 0, y: 100 });
-            resetEntityVisualsAndPhysics(enemy, ENEMY_STATS, { x: 0, y: -100 });
-
-            // Ensure bodies are in world
-            Composite.remove(engine.world, player.body);
-            Composite.remove(engine.world, enemy.body);
-            Composite.add(engine.world, [player.body, enemy.body]);
-        } else {
-            // If match is running, reset with new stats
-            resetMatch(false);
-        }
-    };
-    actions.appendChild(saveBtn);
-    content.appendChild(actions);
-
-    // Close on overlay background click
-    overlay.onclick = (e) => {
-        if (e.target === overlay) {
-            uiContainer.removeChild(overlay);
-            if (previewRenderer) {
-                returnRenderer(previewRenderer); // Return to pool
-                previewRenderer = null;
-            }
-            if (previewControls) {
-                previewControls.dispose();
-                previewControls = null;
-            }
-        }
-    };
-
-    overlay.appendChild(content);
-    uiContainer.appendChild(overlay);
-}
-
-// Pool Editor Modal
-function openPoolEditor() {
-    const tempConfig: PoolConfig = { ...powerUpPool['config'] };
-
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-
-    const content = document.createElement('div');
-    content.className = 'modal-content';
-
-    const header = document.createElement('div');
-    header.className = 'modal-header';
-    header.innerHTML = `<span class="modal-title">Power-Up Pool Editor</span>`;
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'modal-close';
-    closeBtn.innerText = '×';
-    closeBtn.onclick = () => {
-        uiContainer.removeChild(overlay);
-    };
-    header.appendChild(closeBtn);
-    content.appendChild(header);
-
-    // Pool Config Section
-    const poolSection = document.createElement('div');
-    poolSection.className = 'stat-section';
-    poolSection.innerHTML = `<div class="section-title">Configure Pool Counts</div>`;
-    const poolGrid = document.createElement('div');
-    poolGrid.className = 'stat-grid';
-
-    POWERUP_TYPES.forEach(powerup => {
-        const div = createInput(
-            `pool-${powerup.id}`,
-            powerup.label,
-            tempConfig[powerup.id] || 0,
-            powerup.detail,
-            'number',
-            1,
-            (val) => {
-                tempConfig[powerup.id] = Math.max(0, Math.floor(val));
-            }
-        );
-        poolGrid.appendChild(div);
-    });
-
-    poolSection.appendChild(poolGrid);
-    content.appendChild(poolSection);
-
-    // Actions
-    const actions = document.createElement('div');
-    actions.className = 'preset-actions';
-
-    const goBtn = document.createElement('button');
-    goBtn.className = 'action-btn save';
-    goBtn.innerText = 'GO';
-    goBtn.onclick = () => {
-        powerUpPool.updateConfig(tempConfig);
-        uiContainer.removeChild(overlay);
-    };
-    actions.appendChild(goBtn);
-    content.appendChild(actions);
-
-    overlay.onclick = (e) => {
-        if (e.target === overlay) {
-            uiContainer.removeChild(overlay);
-        }
-    };
-
-    overlay.appendChild(content);
-    uiContainer.appendChild(overlay);
-}
-
-// Custom Confirm Dialog
-function showConfirmDialog(title: string, message: string, onConfirm: () => void) {
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-
-    const content = document.createElement('div');
-    content.className = 'modal-content';
-    content.style.maxWidth = '400px';
-
-    const header = document.createElement('div');
-    header.className = 'modal-header';
-    header.innerHTML = `<span class="modal-title">${title}</span>`;
-    content.appendChild(header);
-
-    const messageDiv = document.createElement('div');
-    messageDiv.style.padding = '20px';
-    messageDiv.style.lineHeight = '1.5';
-    messageDiv.innerText = message;
-    content.appendChild(messageDiv);
-
-    const actions = document.createElement('div');
-    actions.className = 'preset-actions';
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.className = 'action-btn';
-    cancelBtn.innerText = 'Cancel';
-    cancelBtn.onclick = () => {
-        uiContainer.removeChild(overlay);
-    };
-    actions.appendChild(cancelBtn);
-
-    const confirmBtn = document.createElement('button');
-    confirmBtn.className = 'action-btn save';
-    confirmBtn.innerText = 'Confirm Reset';
-    confirmBtn.onclick = () => {
-        uiContainer.removeChild(overlay);
-        onConfirm();
-    };
-    actions.appendChild(confirmBtn);
-
-    content.appendChild(actions);
-    overlay.appendChild(content);
-    uiContainer.appendChild(overlay);
-}
-
-// Power-Up Card Container
-const powerupContainer = document.createElement('div');
-powerupContainer.className = 'powerup-container';
-powerupContainer.style.display = 'none';
-uiContainer.appendChild(powerupContainer);
-
-// Power-Up Timer State
-interface PowerUpState {
-    isActive: boolean;
-    elapsedTime: number; // in ms
-    playerChoice: { powerup: PowerUp, index: number } | null;
-    enemyChoice: { powerup: PowerUp, index: number } | null;
-    isRevealing: boolean;
-    revealTime: number;
-}
-
-const POWERUP_DURATION = 5000; // 5 seconds to choose
-const REVEAL_DURATION = 2000; // 2 seconds to show result
-
-let powerUpState: PowerUpState = {
-    isActive: false,
-    elapsedTime: 0,
-    playerChoice: null,
-    enemyChoice: null,
-    isRevealing: false,
-    revealTime: 0
+// Hold to Defend Logic
+const setPattern = (e: Event, pattern: number) => {
+    e.preventDefault(); // Prevent ghost clicks
+    currentPatternIndex = pattern;
+    cycleBtn.classList.add('active');
+    updatePatternState();
 };
 
-let currentPowerups: PowerUp[] = [];
-
-function showPowerupCards() {
-    if (!hasLaunched || gameOver) return;
-
-    // Draw 3 cards from pool
-    currentPowerups = powerUpPool.draw(3);
-
-    if (currentPowerups.length === 0) {
-        // Pool exhausted
-        powerupContainer.style.display = 'none';
-        return;
-    }
-
-    // Reset State
-    powerUpState = {
-        isActive: true,
-        elapsedTime: 0,
-        playerChoice: null,
-        enemyChoice: null,
-        isRevealing: false,
-        revealTime: 0
-    };
-
-    // Clear container
-    powerupContainer.innerHTML = '';
-
-    // Create cards
-    currentPowerups.forEach((powerup, index) => {
-        const card = document.createElement('div');
-        card.className = 'powerup-card';
-        card.dataset.index = index.toString(); // For easy access
-        card.innerHTML = `
-            <div class="powerup-label">${powerup.label}</div>
-            <div class="powerup-detail">${powerup.detail}</div>
-            <div class="powerup-key">${index + 1}</div>
-            <div class="choice-badge player-badge" style="display: none;">P1</div>
-            <div class="choice-badge cpu-badge" style="display: none;">CPU</div>
-        `;
-
-        // Click handler
-        card.onclick = () => selectPowerup(powerup, index);
-
-        powerupContainer.appendChild(card);
-    });
-
-    powerupContainer.style.display = 'flex';
+function updatePatternState() {
+    updatePhysicsFromPattern();
 }
 
-function selectPowerup(powerup: PowerUp, index: number) {
-    if (!powerUpState.isActive || powerUpState.isRevealing || powerUpState.playerChoice) return;
 
-    // Lock in Player Choice
-    powerUpState.playerChoice = { powerup, index };
+// Event Listeners
+cycleBtn.addEventListener('mousedown', (e) => { setPattern(e, 1) });
+cycleBtn.addEventListener('pointerdown', (e) => { setPattern(e, 1) }, { passive: false });
 
-    // Highlight selected card visually
-    const cards = powerupContainer.querySelectorAll('.powerup-card');
-    cards[index].classList.add('selected');
-}
+cycleBtn.addEventListener('pointerup', (e) => { setPattern(e, 0) });
+cycleBtn.addEventListener('pointerleave', (e) => { setPattern(e, 0) });
 
-function updatePowerUpLogic(dt: number) {
-    if (!powerUpState.isActive) return;
 
-    // 1. Selection Phase
-    if (!powerUpState.isRevealing) {
-        powerUpState.elapsedTime += dt;
+cycleBtnContainer.appendChild(cycleBtn);
 
-        // Update Timer UI (Optional - maybe add a bar later)
-
-        if (powerUpState.elapsedTime >= POWERUP_DURATION) {
-            // Time's up! Transition to Reveal
-            resolveChoicesAndReveal();
-        }
-    }
-    // 2. Reveal Phase
-    else {
-        powerUpState.revealTime += dt;
-        if (powerUpState.revealTime >= REVEAL_DURATION) {
-            finishPowerUpCycle();
-        }
-    }
-}
-
-function resolveChoicesAndReveal() {
-    powerUpState.isRevealing = true;
-
-    // 1. Ensure Player Choice (Random if not made)
-    if (!powerUpState.playerChoice) {
-        // Pick random available
-        const randomIdx = Math.floor(Math.random() * currentPowerups.length);
-        powerUpState.playerChoice = { powerup: currentPowerups[randomIdx], index: randomIdx };
-    }
-
-    // 2. Ensure Enemy Choice (Random)
-    if (!powerUpState.enemyChoice) {
-        const randomIdx = Math.floor(Math.random() * currentPowerups.length);
-        powerUpState.enemyChoice = { powerup: currentPowerups[randomIdx], index: randomIdx };
-    }
-
-    // 3. Update UI to show choices
-    const cards = powerupContainer.querySelectorAll('.powerup-card');
-
-    // Show P1 Badge
-    const p1Card = cards[powerUpState.playerChoice.index] as HTMLElement;
-    if (p1Card) {
-        p1Card.classList.add('selected'); // Ensure highlighted
-        const badge = p1Card.querySelector('.player-badge') as HTMLElement;
-        if (badge) badge.style.display = 'block';
-    }
-
-    // Show CPU Badge
-    const cpuCard = cards[powerUpState.enemyChoice.index] as HTMLElement;
-    if (cpuCard) {
-        // CPU might pick same as player, that's fine
-        const badge = cpuCard.querySelector('.cpu-badge') as HTMLElement;
-        if (badge) badge.style.display = 'block';
-    }
-}
-
-function finishPowerUpCycle() {
-    powerUpState.isActive = false;
-    powerUpState.isRevealing = false;
-
-    // Apply Effects
-    if (powerUpState.playerChoice) {
-        powerUpState.playerChoice.powerup.apply(player);
-        powerUpPool.remove(powerUpState.playerChoice.powerup);
-    }
-
-    if (powerUpState.enemyChoice) {
-        powerUpState.enemyChoice.powerup.apply(enemy);
-        // Only remove if different from player selection
-        if (!powerUpState.playerChoice || powerUpState.playerChoice.powerup.id !== powerUpState.enemyChoice.powerup.id) {
-            powerUpPool.remove(powerUpState.enemyChoice.powerup);
-        }
-    }
-
-    // Hide UI
-    powerupContainer.style.display = 'none';
-
-    // Start next cycle after a brief delay
-    startPowerupTimer();
-}
-
-function startPowerupTimer() {
-    // Just trigger show immediately, logic handles the rest
-    setTimeout(showPowerupCards, 500);
-}
-
-function stopPowerupTimer() {
-    powerUpState.isActive = false;
-    powerupContainer.style.display = 'none';
-}
-
-// Keyboard shortcuts for power-up selection
-window.addEventListener('keydown', (e) => {
-    if (!hasLaunched || gameOver || currentPowerups.length === 0) return;
-
-    const key = e.key;
-    if (key === '1' && currentPowerups[0]) {
-        selectPowerup(currentPowerups[0], 0);
-    } else if (key === '2' && currentPowerups[1]) {
-        selectPowerup(currentPowerups[1], 1);
-    } else if (key === '3' && currentPowerups[2]) {
-        selectPowerup(currentPowerups[2], 2);
-    }
-});
+// Init Physics
+updatePhysicsFromPattern();
 
 const playerRpmEl = document.getElementById('player-rpm')!;
 const enemyRpmEl = document.getElementById('enemy-rpm')!;
 const playerMeterEl = document.getElementById('player-meter') as HTMLMeterElement;
 const enemyMeterEl = document.getElementById('enemy-meter') as HTMLMeterElement;
+
+
 
 
 // --- Spark System ---
@@ -1581,7 +859,7 @@ for (let i = 0; i < bufferSize; i++) {
     data[i] = Math.random() * 2 - 1;
 }
 
-function playCollisionSound(intensity: number, isCrit: boolean) {
+function playCollisionSound(intensity: number, baseFrequency: number) {
     if (audioCtx.state === 'suspended') {
         audioCtx.resume();
     }
@@ -1611,7 +889,9 @@ function playCollisionSound(intensity: number, isCrit: boolean) {
     // 2. Heavy Metal Clang
     const scale = [1, 3 / 2, 5 / 4, 7 / 4, 2];
     const pick = Math.floor(Math.random() * scale.length);
-    const baseFreq = 200 * scale[pick];
+    // Use the passed baseFrequency instead of calculating from 200 constant
+    // But keep the scale variation? user passed 200/400/100, so we can treat that as the "200" in original code
+    const baseFreq = baseFrequency * scale[pick];
     const ratios = [1, 1.5, 2.0, 2.5];
 
     ratios.forEach((ratio, index) => {
@@ -1619,7 +899,7 @@ function playCollisionSound(intensity: number, isCrit: boolean) {
         const oscGain = audioCtx.createGain();
 
         osc.type = index % 2 == 0 ? 'square' : 'triangle';
-        osc.frequency.setValueAtTime(baseFreq * ratio * (isCrit ? 2 : 1), t);
+        osc.frequency.setValueAtTime(baseFreq * ratio, t);
 
         osc.connect(oscGain);
         oscGain.connect(masterGain);
@@ -1644,27 +924,40 @@ Events.on(engine, 'collisionStart', (event) => {
         if (entityA && entityB && entityA.stats && entityB.stats) {
 
             // A hits B
-            const critA = Math.random() < entityA.stats.crt;
-            const rawDmgA = critA ? entityA.stats.atk * 2 : entityA.stats.atk;
-            const dmgA = Math.max(0, rawDmgA - entityB.stats.def);
+            const speedA = entityA.body.speed;
+            const isCritA = speedA > CRIT_SPEED_THRESHOLD;
+            const rawDmgA = isCritA ? entityA.stats.crtAtk : entityA.stats.atk;
+            const finalDmgA = Math.max(0, rawDmgA - entityB.stats.def);
+
             if (entityB.currentRpm !== undefined) {
-                entityB.currentRpm = Math.max(0, entityB.currentRpm - dmgA);
+                entityB.currentRpm = Math.max(0, entityB.currentRpm - finalDmgA);
             }
 
             // B hits A
-            const critB = Math.random() < entityB.stats.crt;
-            const rawDmgB = critB ? entityB.stats.atk * 2 : entityB.stats.atk;
-            const dmgB = Math.max(0, rawDmgB - entityA.stats.def);
+            const speedB = entityB.body.speed;
+            const isCritB = speedB > CRIT_SPEED_THRESHOLD;
+            const rawDmgB = isCritB ? entityB.stats.crtAtk : entityB.stats.atk;
+            const finalDmgB = Math.max(0, rawDmgB - entityA.stats.def);
+
             if (entityA.currentRpm !== undefined) {
-                entityA.currentRpm = Math.max(0, entityA.currentRpm - dmgB);
+                entityA.currentRpm = Math.max(0, entityA.currentRpm - finalDmgB);
             }
 
-            // Sparks - White by default, Attacker color on Crit
-            const attacker = critA ? entityA : (critB ? entityB : null);
-            const sparkColor = attacker ? attacker.stats!.ringColor : 0xffffff;
-            const isCrit = critA || critB;
-            const count = isCrit ? 15 : 5;
-            const speed = isCrit ? 5 : 2;
+
+            // Sparks & Sound
+            const isHighSpeed = isCritA || isCritB;
+
+            // Determine "Attacker" (who is moving faster?)
+            // Default to white/gray for low speed bumps
+            let sparkColor = 0xdddddd;
+
+            if (isHighSpeed) {
+                // Use color of the faster bey
+                sparkColor = speedA > speedB ? entityA.stats.ringColor : entityB.stats.ringColor;
+            }
+
+            const count = isHighSpeed ? 15 : 3;
+            const speed = isHighSpeed ? 5 : 2;
 
             if (pair.collision.supports.length > 0) {
                 const { x, y } = pair.collision.supports[0];
@@ -1672,19 +965,34 @@ Events.on(engine, 'collisionStart', (event) => {
                     createSpark(x, y, sparkColor, speed);
                 }
             }
-
-            playCollisionSound(isCrit ? 0.5 : 0.25, isCrit);
-
+            if (isHighSpeed)
+                playCollisionSound(0.5, 400); // High Pitch
+            else
+                playCollisionSound(0.2, 200); // Normal Pitch
         } else {
             // Fallback / Wall hits
+            // If one is a Beyblade and the other is not (Environment), apply Barrier Damage
+            if (entityA && !entityB) {
+                // A hit a wall
+                if (entityA.currentRpm !== undefined) {
+                    entityA.currentRpm = Math.max(0, entityA.currentRpm - BARRIER_DAMAGE);
+                }
+            } else if (entityB && !entityA) {
+                // B hit a wall
+                if (entityB.currentRpm !== undefined) {
+                    entityB.currentRpm = Math.max(0, entityB.currentRpm - BARRIER_DAMAGE);
+                }
+            }
+
             if (pair.collision.supports.length > 0) {
                 const { x, y } = pair.collision.supports[0];
                 for (let i = 0; i < 5; i++) {
                     createSpark(x, y, 0xaaaaaa, 2);
                 }
             }
-            playCollisionSound(0.1, false);
+            playCollisionSound(0.5, 100 * 1.67);
         }
+
     });
 });
 
@@ -1692,17 +1000,10 @@ Events.on(engine, 'collisionStart', (event) => {
 // --- Game Loop ---
 const SUBSTEPS = 8;
 let frameCounter = 0;
-let lastTime = performance.now();
+
 
 function animate() {
     requestAnimationFrame(animate);
-
-    const currentTime = performance.now();
-    const deltaTime = currentTime - lastTime;
-    lastTime = currentTime;
-
-    // Update Power-Up Logic
-    updatePowerUpLogic(deltaTime);
 
     // Physics Update
     const subStepDelta = (1000 / 60) / SUBSTEPS;
@@ -1718,10 +1019,22 @@ function animate() {
                     const px = entity.body.position.x;
                     const py = entity.body.position.y;
                     const dist = Math.sqrt(px * px + py * py);
-                    // if (dist == 0) return;
+
+                    // --- Speed Threshold Visuals (Ground Sparks) ---
+                    const speed = entity.body.speed;
+                    if (speed > CRIT_SPEED_THRESHOLD) {
+                        // Throttled spawn (random chance per frame)
+                        if (Math.random() < 0.3) {
+                            // Spark at contact point (approximate ground contact)
+                            // We can use current position, maybe slightly offset opposite to velocity
+                            createSpark(px, py, entity.stats.ringColor, 2);
+                        }
+                    }
+
                     // Normalized radial direction (toward center)
                     const radialX = -px / dist;
                     const radialY = -py / dist;
+
 
                     // Tangent direction (perpendicular, clockwise)
                     // Rotate radial 90° clockwise: (x, y) -> (y, -x)
@@ -2022,13 +1335,10 @@ launchBtn.addEventListener('click', () => {
 
     // Hide UI handled in animate loop or here
     launchContainer.style.display = 'none';
+    cycleBtnContainer.style.display = 'flex'; // Show Pattern Button
 
     // Update action HUD buttons
-    poolBtn.style.display = 'none';
     resetHint.style.display = 'block';
-
-    // Start power-up timer
-    startPowerupTimer();
 });
 
 // Window Resize Handling
@@ -2061,7 +1371,7 @@ function showWinner(text: string) {
     rematchBtn.innerText = 'REMATCH';
     rematchBtn.onclick = () => {
         document.body.removeChild(overlay);
-        showResetDialog(false);
+        resetMatch();
     };
     overlay.appendChild(rematchBtn);
 
@@ -2119,54 +1429,35 @@ const resetEntityVisualsAndPhysics = (entity: GameEntity, stats: BeybladeStats, 
     entity.driftRotation = undefined;
 };
 
-function resetMatch(keepPowerups: boolean = false) {
+function resetMatch() {
     hasLaunched = false;
     gameOver = false;
 
     // Update action HUD buttons
-    poolBtn.style.display = 'block';
     resetHint.style.display = 'none';
+    cycleBtnContainer.style.display = 'none'; // Hide Pattern Button
 
-    // Stop power-up timer and reset pool
-    stopPowerupTimer();
-    powerUpPool.initialize();
 
     // Clear Sparks
     sparks.forEach(s => scene.remove(s.mesh));
     sparks.length = 0;
 
-    if (keepPowerups) {
-        // Keep power-ups: Save current stats to localStorage and update PLAYER_STATS/ENEMY_STATS
-        if (player.stats && enemy.stats) {
-            // Update the global stats with current accumulated stats
-            Object.assign(PLAYER_STATS, player.stats);
-            Object.assign(ENEMY_STATS, enemy.stats);
+    // Reset to match start stats (before power-ups were applied)
+    if (matchStartPlayerStats && matchStartEnemyStats) {
 
-            // Save to localStorage
-            savePresets();
+        // Update global stats to match start snapshot
+        Object.assign(PLAYER_STATS, matchStartPlayerStats);
+        Object.assign(ENEMY_STATS, matchStartEnemyStats);
 
-            // Reset entities with the new stats
-            resetEntityVisualsAndPhysics(player, PLAYER_STATS, { x: 0, y: 100 });
-            resetEntityVisualsAndPhysics(enemy, ENEMY_STATS, { x: 0, y: -100 });
-        }
+        // Reset entities with match start stats
+        resetEntityVisualsAndPhysics(player, matchStartPlayerStats, { x: 0, y: 100 });
+        resetEntityVisualsAndPhysics(enemy, matchStartEnemyStats, { x: 0, y: -100 });
+
     } else {
-        // Discard power-ups: Reset to match start stats (before power-ups were applied)
-        if (matchStartPlayerStats && matchStartEnemyStats) {
-
-            // Update global stats to match start snapshot
-            Object.assign(PLAYER_STATS, matchStartPlayerStats);
-            Object.assign(ENEMY_STATS, matchStartEnemyStats);
-
-            // Reset entities with match start stats
-            resetEntityVisualsAndPhysics(player, matchStartPlayerStats, { x: 0, y: 100 });
-            resetEntityVisualsAndPhysics(enemy, matchStartEnemyStats, { x: 0, y: -100 });
-        } else {
-            // Fallback if no snapshot exists
-            resetEntityVisualsAndPhysics(player, PLAYER_STATS, { x: 0, y: 100 });
-            resetEntityVisualsAndPhysics(enemy, ENEMY_STATS, { x: 0, y: -100 });
-        }
+        // Fallback if no snapshot exists
+        resetEntityVisualsAndPhysics(player, PLAYER_STATS, { x: 0, y: 100 });
+        resetEntityVisualsAndPhysics(enemy, ENEMY_STATS, { x: 0, y: -100 });
     }
-
     // Ensure bodies are in world (safe add)
     Composite.remove(engine.world, player.body);
     Composite.remove(engine.world, enemy.body);
@@ -2178,66 +1469,8 @@ function resetMatch(keepPowerups: boolean = false) {
     guideMesh.visible = true;
 }
 
-function showResetDialog(showCancel: boolean = true) {
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
+// showResetDialog removed
 
-    const content = document.createElement('div');
-    content.className = 'modal-content';
-    content.style.maxWidth = '400px';
-
-    const header = document.createElement('div');
-    header.className = 'modal-header';
-    header.innerHTML = `<span class="modal-title">Reset Match</span>`;
-    content.appendChild(header);
-
-    const messageDiv = document.createElement('div');
-    messageDiv.style.padding = '20px';
-    messageDiv.style.lineHeight = '1.5';
-    messageDiv.innerText = 'Do you want to keep the power-ups applied?';
-    content.appendChild(messageDiv);
-
-    const actions = document.createElement('div');
-    actions.className = 'preset-actions';
-    actions.style.flexDirection = 'column';
-    actions.style.gap = '10px';
-
-    const keepBtn = document.createElement('button');
-    keepBtn.className = 'action-btn save';
-    keepBtn.innerText = 'Keep Power Ups';
-    keepBtn.style.width = '100%';
-    keepBtn.onclick = () => {
-        uiContainer.removeChild(overlay);
-        resetMatch(true);
-    };
-    actions.appendChild(keepBtn);
-
-    const fullResetBtn = document.createElement('button');
-    fullResetBtn.className = 'action-btn';
-    fullResetBtn.innerText = 'Discard Power Ups';
-    fullResetBtn.style.width = '100%';
-    fullResetBtn.onclick = () => {
-        uiContainer.removeChild(overlay);
-        resetMatch(false);
-    };
-    actions.appendChild(fullResetBtn);
-
-    // Only show Cancel button if showCancel is true
-    if (showCancel) {
-        const cancelBtn = document.createElement('button');
-        cancelBtn.className = 'action-btn reset';
-        cancelBtn.innerText = 'Cancel';
-        cancelBtn.style.width = '100%';
-        cancelBtn.onclick = () => {
-            uiContainer.removeChild(overlay);
-        };
-        actions.appendChild(cancelBtn);
-    }
-
-    content.appendChild(actions);
-    overlay.appendChild(content);
-    uiContainer.appendChild(overlay);
-}
 
 // Reset Key
 window.addEventListener('keydown', (e) => {
@@ -2246,8 +1479,6 @@ window.addEventListener('keydown', (e) => {
         if (overlay && overlay.parentNode) {
             overlay.parentNode.removeChild(overlay);
         }
-        if (hasLaunched) {
-            showResetDialog(true);
-        }
+        resetMatch();
     }
 });
