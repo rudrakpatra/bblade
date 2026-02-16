@@ -338,17 +338,11 @@ for (let i = 0; i <= segments; i++) {
 }
 // Extend a bit for the rim
 profilePoints.push(new THREE.Vector2(ARENA_RADIUS + 10, BOWL_MAX_HEIGHT + 2));
-
-const textureLoader = new THREE.TextureLoader();
-// Ceramic Matcap for Floor
-const floorMatcap = textureLoader.load('https://raw.githubusercontent.com/nidorx/matcaps/master/256/D5D5D5_929292_ACACAC_B4B4B4-256px.png');
-
 const floorGeometry = new THREE.LatheGeometry(profilePoints, 128); // Increased segments for smoothness
 floorGeometry.computeVertexNormals(); // Ensure smooth normals
 
 const floorMaterial = new THREE.MeshMatcapMaterial({
     color: 0x111111,
-    matcap: floorMatcap,
     side: THREE.DoubleSide
 });
 const floor = new THREE.Mesh(floorGeometry, floorMaterial);
@@ -769,12 +763,9 @@ async function loadMatcapLibrary() {
 loadMatcapLibrary();
 
 const textureCache: Record<string, THREE.Texture> = {};
-// textureLoader already defined above or we get from global if available. 
-// Actually textureLoader was defined in main scope, let's just use it or create new if scope issue.
-// Global textureLoader is at line ~350, so it should be visible here.
 const defaultMatcapUrl = 'https://raw.githubusercontent.com/nidorx/matcaps/master/256/D5D5D5_929292_ACACAC_B4B4B4-256px.png';
+const textureLoader = new THREE.TextureLoader();
 const matcapTexture = textureLoader.load(defaultMatcapUrl);
-
 function getMatcapTexture(url: string | undefined): THREE.Texture {
     if (!url) return matcapTexture; // Default ceramic
 
