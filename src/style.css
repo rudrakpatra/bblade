@@ -1,4 +1,7 @@
 /* --- Brutalist / Retro Theme (Snappy, No Anim) --- */
+* {
+  user-select: none;
+}
 
 .choice-badge {
   position: absolute;
@@ -259,6 +262,7 @@ button {
   /* Compact font size */
   pointer-events: auto;
   position: relative;
+  user-select: none;
 }
 
 button:hover {
