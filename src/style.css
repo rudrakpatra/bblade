@@ -1,4 +1,28 @@
 /* --- Brutalist / Retro Theme (Snappy, No Anim) --- */
+
+.choice-badge {
+  position: absolute;
+  top: -30px;
+  padding: 2px 8px;
+  font-weight: bold;
+  font-size: 0.8rem;
+  background: var(--bg-color);
+  color: var(--text-color);
+  border: var(--border-width) solid var(--border-color);
+  box-shadow: 4px 4px 0px var(--border-color);
+  z-index: 10;
+}
+
+.player-badge {
+  left: 30px;
+  color: white;
+}
+
+.cpu-badge {
+  right: 30px;
+  color: white;
+}
+
 :root {
   --bg-color: #222;
   --text-color: #ffffff;

@@ -1368,21 +1368,31 @@ powerupContainer.style.display = 'none';
 uiContainer.appendChild(powerupContainer);
 
 // Power-Up Timer State
-let powerupTimer: number | null = null;
-let autoSelectTimeout: number | null = null;
+interface PowerUpState {
+    isActive: boolean;
+    elapsedTime: number; // in ms
+    playerChoice: { powerup: PowerUp, index: number } | null;
+    enemyChoice: { powerup: PowerUp, index: number } | null;
+    isRevealing: boolean;
+    revealTime: number;
+}
+
+const POWERUP_DURATION = 5000; // 5 seconds to choose
+const REVEAL_DURATION = 2000; // 2 seconds to show result
+
+let powerUpState: PowerUpState = {
+    isActive: false,
+    elapsedTime: 0,
+    playerChoice: null,
+    enemyChoice: null,
+    isRevealing: false,
+    revealTime: 0
+};
+
 let currentPowerups: PowerUp[] = [];
-let playerSelection: PowerUp | null = null;
-let enemySelection: PowerUp | null = null;
-const POWERUP_INTERVAL = 5000; // 5 seconds
 
 function showPowerupCards() {
     if (!hasLaunched || gameOver) return;
-
-    // Clear any existing auto-select timeout
-    if (autoSelectTimeout) {
-        clearTimeout(autoSelectTimeout);
-        autoSelectTimeout = null;
-    }
 
     // Draw 3 cards from pool
     currentPowerups = powerUpPool.draw(3);
@@ -1393,19 +1403,30 @@ function showPowerupCards() {
         return;
     }
 
+    // Reset State
+    powerUpState = {
+        isActive: true,
+        elapsedTime: 0,
+        playerChoice: null,
+        enemyChoice: null,
+        isRevealing: false,
+        revealTime: 0
+    };
+
     // Clear container
     powerupContainer.innerHTML = '';
-    playerSelection = null;
-    enemySelection = null;
 
     // Create cards
     currentPowerups.forEach((powerup, index) => {
         const card = document.createElement('div');
         card.className = 'powerup-card';
+        card.dataset.index = index.toString(); // For easy access
         card.innerHTML = `
             <div class="powerup-label">${powerup.label}</div>
             <div class="powerup-detail">${powerup.detail}</div>
             <div class="powerup-key">${index + 1}</div>
+            <div class="choice-badge player-badge" style="display: none;">P1</div>
+            <div class="choice-badge cpu-badge" style="display: none;">CPU</div>
         `;
 
         // Click handler
@@ -1415,78 +1436,110 @@ function showPowerupCards() {
     });
 
     powerupContainer.style.display = 'flex';
-
-    // Auto-select after 5 seconds
-    autoSelectTimeout = window.setTimeout(() => {
-        if (!playerSelection && currentPowerups.length > 0) {
-            const middleIndex = Math.floor(currentPowerups.length / 2);
-            selectPowerup(currentPowerups[middleIndex], middleIndex, true);
-        }
-    }, POWERUP_INTERVAL);
 }
 
-function selectPowerup(powerup: PowerUp, index: number, isAutoSelect: boolean = false) {
-    if (playerSelection) return; // Already selected
+function selectPowerup(powerup: PowerUp, index: number) {
+    if (!powerUpState.isActive || powerUpState.isRevealing || powerUpState.playerChoice) return;
 
-    playerSelection = powerup;
+    // Lock in Player Choice
+    powerUpState.playerChoice = { powerup, index };
 
-    // Highlight selected card
+    // Highlight selected card visually
     const cards = powerupContainer.querySelectorAll('.powerup-card');
     cards[index].classList.add('selected');
+}
 
-    // CPU picks randomly at the same time
-    if (!enemySelection) {
-        const enemyIndex = Math.floor(Math.random() * currentPowerups.length);
-        enemySelection = currentPowerups[enemyIndex];
+function updatePowerUpLogic(dt: number) {
+    if (!powerUpState.isActive) return;
+
+    // 1. Selection Phase
+    if (!powerUpState.isRevealing) {
+        powerUpState.elapsedTime += dt;
+
+        // Update Timer UI (Optional - maybe add a bar later)
+
+        if (powerUpState.elapsedTime >= POWERUP_DURATION) {
+            // Time's up! Transition to Reveal
+            resolveChoicesAndReveal();
+        }
+    }
+    // 2. Reveal Phase
+    else {
+        powerUpState.revealTime += dt;
+        if (powerUpState.revealTime >= REVEAL_DURATION) {
+            finishPowerUpCycle();
+        }
+    }
+}
+
+function resolveChoicesAndReveal() {
+    powerUpState.isRevealing = true;
+
+    // 1. Ensure Player Choice (Random if not made)
+    if (!powerUpState.playerChoice) {
+        // Pick random available
+        const randomIdx = Math.floor(Math.random() * currentPowerups.length);
+        powerUpState.playerChoice = { powerup: currentPowerups[randomIdx], index: randomIdx };
     }
 
-    // Clear auto-select timeout if player selected manually
-    if (!isAutoSelect && autoSelectTimeout) {
-        clearTimeout(autoSelectTimeout);
-        autoSelectTimeout = null;
+    // 2. Ensure Enemy Choice (Random)
+    if (!powerUpState.enemyChoice) {
+        const randomIdx = Math.floor(Math.random() * currentPowerups.length);
+        powerUpState.enemyChoice = { powerup: currentPowerups[randomIdx], index: randomIdx };
     }
 
-    // Apply power-ups immediately
-    setTimeout(() => {
-        if (playerSelection) {
-            playerSelection.apply(player);
-            powerUpPool.remove(playerSelection);
+    // 3. Update UI to show choices
+    const cards = powerupContainer.querySelectorAll('.powerup-card');
+
+    // Show P1 Badge
+    const p1Card = cards[powerUpState.playerChoice.index] as HTMLElement;
+    if (p1Card) {
+        p1Card.classList.add('selected'); // Ensure highlighted
+        const badge = p1Card.querySelector('.player-badge') as HTMLElement;
+        if (badge) badge.style.display = 'block';
+    }
+
+    // Show CPU Badge
+    const cpuCard = cards[powerUpState.enemyChoice.index] as HTMLElement;
+    if (cpuCard) {
+        // CPU might pick same as player, that's fine
+        const badge = cpuCard.querySelector('.cpu-badge') as HTMLElement;
+        if (badge) badge.style.display = 'block';
+    }
+}
+
+function finishPowerUpCycle() {
+    powerUpState.isActive = false;
+    powerUpState.isRevealing = false;
+
+    // Apply Effects
+    if (powerUpState.playerChoice) {
+        powerUpState.playerChoice.powerup.apply(player);
+        powerUpPool.remove(powerUpState.playerChoice.powerup);
+    }
+
+    if (powerUpState.enemyChoice) {
+        powerUpState.enemyChoice.powerup.apply(enemy);
+        // Only remove if different from player selection
+        if (!powerUpState.playerChoice || powerUpState.playerChoice.powerup.id !== powerUpState.enemyChoice.powerup.id) {
+            powerUpPool.remove(powerUpState.enemyChoice.powerup);
         }
+    }
 
-        if (enemySelection) {
-            enemySelection.apply(enemy);
-            // Only remove if different from player selection
-            if (!playerSelection || playerSelection.id !== enemySelection.id) {
-                powerUpPool.remove(enemySelection);
-            }
-        }
+    // Hide UI
+    powerupContainer.style.display = 'none';
 
-        // Hide cards
-        powerupContainer.style.display = 'none';
-
-        // Show next cards after brief delay
-        setTimeout(() => {
-            showPowerupCards();
-        }, 500);
-    }, 500);
+    // Start next cycle after a brief delay
+    startPowerupTimer();
 }
 
 function startPowerupTimer() {
-    stopPowerupTimer(); // Clean up any existing timer
-
-    // Show first cards immediately
-    showPowerupCards();
+    // Just trigger show immediately, logic handles the rest
+    setTimeout(showPowerupCards, 500);
 }
 
 function stopPowerupTimer() {
-    if (powerupTimer) {
-        clearInterval(powerupTimer);
-        powerupTimer = null;
-    }
-    if (autoSelectTimeout) {
-        clearTimeout(autoSelectTimeout);
-        autoSelectTimeout = null;
-    }
+    powerUpState.isActive = false;
     powerupContainer.style.display = 'none';
 }
 
@@ -1665,9 +1718,17 @@ Events.on(engine, 'collisionStart', (event) => {
 // --- Game Loop ---
 const SUBSTEPS = 8;
 let frameCounter = 0;
+let lastTime = performance.now();
 
 function animate() {
     requestAnimationFrame(animate);
+
+    const currentTime = performance.now();
+    const deltaTime = currentTime - lastTime;
+    lastTime = currentTime;
+
+    // Update Power-Up Logic
+    updatePowerUpLogic(deltaTime);
 
     // Physics Update
     const subStepDelta = (1000 / 60) / SUBSTEPS;
