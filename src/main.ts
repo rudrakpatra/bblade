@@ -2,6 +2,7 @@
 import Matter from 'matter-js';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import "./style.css";
 
 // --- Physics Setup (Matter.js) ---
@@ -271,20 +272,6 @@ function updateGuide(angleDeg: number) {
     uvAttr.needsUpdate = true;
 }
 
-
-
-// Lights
-const ambientLight = new THREE.AmbientLight(0x404040, 2); // Soft white light
-scene.add(ambientLight);
-
-const dirLight = new THREE.DirectionalLight(0xffffff, 2);
-dirLight.position.set(100, 200, 100);
-dirLight.castShadow = true;
-dirLight.shadow.mapSize.width = 2048;
-dirLight.shadow.mapSize.height = 2048;
-scene.add(dirLight);
-
-
 // --- Game Constants ---
 const ARENA_RADIUS = 300;
 const BEYBLADE_RADIUS = 30; // Physics radius
@@ -352,9 +339,16 @@ for (let i = 0; i <= segments; i++) {
 // Extend a bit for the rim
 profilePoints.push(new THREE.Vector2(ARENA_RADIUS + 10, BOWL_MAX_HEIGHT + 2));
 
-const floorGeometry = new THREE.LatheGeometry(profilePoints, 64);
-const floorMaterial = new THREE.MeshBasicMaterial({
-    color: 0x333333,
+const textureLoader = new THREE.TextureLoader();
+// Ceramic Matcap for Floor
+const floorMatcap = textureLoader.load('https://raw.githubusercontent.com/nidorx/matcaps/master/256/D5D5D5_929292_ACACAC_B4B4B4-256px.png');
+
+const floorGeometry = new THREE.LatheGeometry(profilePoints, 128); // Increased segments for smoothness
+floorGeometry.computeVertexNormals(); // Ensure smooth normals
+
+const floorMaterial = new THREE.MeshMatcapMaterial({
+    color: 0x111111,
+    matcap: floorMatcap,
     side: THREE.DoubleSide
 });
 const floor = new THREE.Mesh(floorGeometry, floorMaterial);
@@ -362,8 +356,8 @@ arenaGroup.add(floor);
 
 
 // Walls Visual (Ring at top)
-const wallGeometry = new THREE.TorusGeometry(ARENA_RADIUS, 5, 16, 100);
-const wallMaterial = new THREE.MeshBasicMaterial({ color: 0x666666 });
+const wallGeometry = new THREE.RingGeometry(ARENA_RADIUS + 5, ARENA_RADIUS + 10, 100).translate(0, 0, -2);
+const wallMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
 const wallMesh = new THREE.Mesh(wallGeometry, wallMaterial);
 wallMesh.rotation.x = Math.PI / 2;
 wallMesh.position.y = BOWL_MAX_HEIGHT;
@@ -386,53 +380,144 @@ function createBeybladeMesh(stats: BeybladeStats): { mesh: THREE.Group, tiltGrou
     // Apply global scale
     spinGroup.scale.setScalar(stats.beyScale || 1.0);
 
-    // 1. Metal Wheel (Base)
-    const wheelGeo = new THREE.CylinderGeometry(BEYBLADE_RADIUS, BEYBLADE_RADIUS, 4, 32);
+    const pm = stats.partMatcaps || {};
+    const wheelTex = getMatcapTexture(pm.wheel);
+    const ringTex = getMatcapTexture(pm.ring);
+    const boltTex = getMatcapTexture(pm.bolt);
+    const trackTex = getMatcapTexture(pm.spinTrack);
+    const tipTex = getMatcapTexture(pm.tip);
+
+    // Helper: Fake Smooth Normals
+    const makeSmooth = (geo: THREE.BufferGeometry) => {
+        geo.deleteAttribute('normal'); // Remove existing normals
+        geo = BufferGeometryUtils.mergeVertices(geo, 0.1); // Merge close vertices
+        geo.computeVertexNormals(); // Recompute purely based on geometry
+        return geo;
+    };
+
+    // Helper for Rounded Cylinder using ExtrudeGeometry
+    const createRoundedCylinder = (radius: number, height: number, bevelSize: number = 0.5) => {
+        const shape = new THREE.Shape();
+        shape.absarc(0, 0, radius, 0, Math.PI * 2, false);
+        const settings = {
+            depth: height - (bevelSize * 2), // Adjust depth so total height includes bevel
+            bevelEnabled: true,
+            bevelThickness: bevelSize,
+            bevelSize: bevelSize,
+            bevelSegments: 8, // Doubled for smoothness
+            curveSegments: 64 // Doubled for smoothness
+        };
+        const geo = new THREE.ExtrudeGeometry(shape, settings);
+        geo.center(); // Center geometry
+        return makeSmooth(geo);
+    };
+
+    // 1. Metal Wheel (Base) - Rounded
+    const wheelGeo = createRoundedCylinder(BEYBLADE_RADIUS, 5, 0.8);
     const wheelMat = new THREE.MeshMatcapMaterial({
         color: stats.wheelColor || 0x888888,
+        matcap: wheelTex
     });
     const wheel = new THREE.Mesh(wheelGeo, wheelMat);
     wheel.position.y = 5;
+    wheel.rotation.x = Math.PI / 2; // Extrude creates on XY plane
     spinGroup.add(wheel);
 
-    // 2. Clear Wheel / Energy Ring
+    // 2. Clear Wheel / Energy Ring - Rounded
     const ringRadius = BEYBLADE_RADIUS * (stats.ringRadiusFactor || 0.75);
-    const ringGeo = new THREE.CylinderGeometry(ringRadius, ringRadius, 8, stats.ringSides || 32);
+    const ringShape = new THREE.Shape();
+    ringShape.absarc(0, 0, ringRadius, 0, Math.PI * 2, false);
+
+    // Create hole for ring
+    const holePath = new THREE.Path();
+    holePath.absarc(0, 0, ringRadius * 0.7, 0, Math.PI * 2, true);
+    ringShape.holes.push(holePath);
+
+    let ringGeo: THREE.BufferGeometry = new THREE.ExtrudeGeometry(ringShape, {
+        depth: 3, // slightly thinner interaction layer
+        bevelEnabled: true,
+        bevelThickness: 0.5,
+        bevelSize: 0.5,
+        bevelSegments: 6, // Smoother bevel
+        curveSegments: Math.max(stats.ringSides || 32, 64) // Ensure high curve count unless sides specified
+    });
+    ringGeo.center();
+    ringGeo = makeSmooth(ringGeo);
+
     const ringMat = new THREE.MeshMatcapMaterial({
         color: stats.ringColor || 0x0088ff,
+        matcap: ringTex
     });
 
     const ring = new THREE.Mesh(ringGeo, ringMat);
-    ring.position.y = 6;
+    ring.position.y = 8; // Stacked
+    ring.rotation.x = Math.PI / 2;
     spinGroup.add(ring);
 
-    // 3. Face Bolt
-    const boltGeo = new THREE.CylinderGeometry(10, 10, 4, stats.boltSides || 6);
+    // 3. Face Bolt - Hexagon with Bevel
+    const boltShape = new THREE.Shape();
+    const sides = stats.boltSides || 6;
+    const boltRadius = 10;
+
+    // Draw polygon
+    for (let i = 0; i < sides; i++) {
+        const theta = (i / sides) * Math.PI * 2;
+        const x = Math.cos(theta) * boltRadius;
+        const y = Math.sin(theta) * boltRadius;
+        if (i === 0) boltShape.moveTo(x, y);
+        else boltShape.lineTo(x, y);
+    }
+    boltShape.closePath();
+
+    let boltGeo: THREE.BufferGeometry = new THREE.ExtrudeGeometry(boltShape, {
+        depth: 4,
+        bevelEnabled: true,
+        bevelThickness: 1,
+        bevelSize: 1,
+        bevelSegments: 2
+    });
+    boltGeo.center();
+    boltGeo = makeSmooth(boltGeo);
+
     const boltMat = new THREE.MeshMatcapMaterial({
         color: stats.boltColor || 0x00ccff,
+        matcap: boltTex
     });
     const bolt = new THREE.Mesh(boltGeo, boltMat);
-    bolt.position.y = 12;
+    bolt.position.y = 12; // Top
+    bolt.rotation.x = Math.PI / 2;
     spinGroup.add(bolt);
 
     // 4. Spin Track
     const stSize = stats.spinTrackSize || 1.0;
-    const spinTrackGeo = new THREE.CylinderGeometry(BEYBLADE_RADIUS * .3 * stSize, BEYBLADE_RADIUS * .2 * stSize, 6, 10);
+    // Use simple cylinder for stem but rounded for base?
+    // Let's stick to Cylinder for the stem part as it's intricate
+    let spinTrackGeo: THREE.BufferGeometry = new THREE.CylinderGeometry(BEYBLADE_RADIUS * .3 * stSize, BEYBLADE_RADIUS * .2 * stSize, 10, 32);
+    spinTrackGeo = makeSmooth(spinTrackGeo);
     const spinTrackMat = new THREE.MeshMatcapMaterial({
         color: stats.spinTrackColor || 0x222222,
+        matcap: trackTex
     });
     const spinTrack = new THREE.Mesh(spinTrackGeo, spinTrackMat);
-    spinTrack.position.y = -2;
+    spinTrack.position.y = -1;
     spinGroup.add(spinTrack);
 
-    // 5. Tip
+    // 5. Tip (Driver) - Rounded Tip
     const tSize = stats.tipSize || 1.0;
-    const tipGeo = new THREE.CylinderGeometry(5 * tSize, 2 * tSize, 10);
+    // Lathe for a smooth tip shape
+    const tipPoints = [];
+    tipPoints.push(new THREE.Vector2(0, 0)); // Bottom contact point (sharp)
+    tipPoints.push(new THREE.Vector2(2 * tSize, 1));
+    tipPoints.push(new THREE.Vector2(5 * tSize, 8)); // Top wide base
+    let tipGeo: THREE.BufferGeometry = new THREE.LatheGeometry(tipPoints, 32); // Smoother tip
+    tipGeo = makeSmooth(tipGeo);
+
     const tipMat = new THREE.MeshMatcapMaterial({
         color: stats.tipColor || 0x333333,
+        matcap: tipTex
     });
     const tip = new THREE.Mesh(tipGeo, tipMat);
-    tip.position.y = -5;
+    tip.position.y = -13;
     spinGroup.add(tip);
 
     return { mesh, tiltGroup, spinGroup };
@@ -453,7 +538,7 @@ class TrailSystem {
 
         const material = new THREE.LineBasicMaterial({
             color: color,
-            linewidth: 2
+            linewidth: 1,
         });
 
         this.mesh = new THREE.Line(this.geometry, material);
@@ -504,12 +589,23 @@ interface BeybladeStats {
     sta: number;
     spd: number;
     spl: number;
+    partMatcaps?: {
+        wheel?: string;
+        ring?: string;
+        bolt?: string;
+        spinTrack?: string;
+        tip?: string;
+    };
+    trailColor: number; // New separate trail color
     crtAtk: number; // Critical Damage Value (Guaranteed above threshold)
+    crt?: number; // Critical Chance (from pool branch compatibility)
     frictionAir: number;
     restitution: number;
     friction: number;
 
     densityBase: number;
+    radius: number;
+    height: number;
     // Arena Forces
     dishForce: number;  // Multiplier for radial force toward center
     curlForce: number;  // Multiplier for tangential clockwise force
@@ -525,6 +621,7 @@ interface BeybladeStats {
     spinTrackSize: number;
     tipColor: number;
     tipSize: number;
+    dragFactor: number;
 }
 
 interface GameEntity {
@@ -573,6 +670,120 @@ const PATTERNS: PhysicsPattern[] = [
 
 let currentPatternIndex = 0;
 
+// --- Matcap Resources ---
+const MATCAP_ROOT = 'https://raw.githubusercontent.com/nidorx/matcaps/master/';
+let MATCAP_LIBRARY: { name: string, file: string, category: string, thumb: string }[] = [
+    {
+        name: 'Ceramic',
+        file: MATCAP_ROOT + '256/D5D5D5_929292_ACACAC_B4B4B4-256px.png',
+        category: 'Ceramic',
+        thumb: MATCAP_ROOT + '64/D5D5D5_929292_ACACAC_B4B4B4-64px.png'
+    }
+];
+
+// Helper: Hex to HSL for categorization
+function getMatcapCategory(filename: string): string {
+    if (!filename.endsWith('.png')) return 'Other';
+    // Remove resolution suffix if present (e.g. -256px)
+    const raw = filename.replace(/-[0-9]+px\.png$/, '.png').replace('.png', '');
+    const parts = raw.split('_');
+    if (parts.length < 4) return 'Other';
+
+    let r = 0, g = 0, b = 0;
+    parts.forEach(hex => {
+        const bigint = parseInt(hex, 16);
+        r += (bigint >> 16) & 255;
+        g += (bigint >> 8) & 255;
+        b += bigint & 255;
+    });
+    r /= parts.length; g /= parts.length; b /= parts.length;
+
+    // RGB to HSL
+    r /= 255, g /= 255, b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h = 0, s = 0, l = (max + min) / 2;
+
+    if (max !== min) {
+        const d = max - min;
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        switch (max) {
+            case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+            case g: h = (b - r) / d + 2; break;
+            case b: h = (r - g) / d + 4; break;
+        }
+        h /= 6;
+    }
+    const hDeg = h * 360;
+
+    if (s < 0.15) {
+        if (l < 0.2) return 'Dark';
+        if (l > 0.8) return 'Ceramic';
+        return 'Silver';
+    } else {
+        if (hDeg >= 30 && hDeg < 60 && l > 0.4) return 'Gold/Bronze';
+        if (hDeg >= 0 && hDeg < 30) return 'Red';
+        if (hDeg >= 330 && hDeg <= 360) return 'Red';
+        if (hDeg >= 60 && hDeg < 150) return 'Green';
+        if (hDeg >= 150 && hDeg < 260) return 'Cyan/Blue';
+        if (hDeg >= 260 && hDeg < 330) return 'Purple';
+        return 'Color';
+    }
+}
+
+async function loadMatcapLibrary() {
+    try {
+        const response = await fetch('/matcaps_library.json');
+        const data = await response.json();
+        MATCAP_LIBRARY = data
+            .filter((f: any) => f.name.endsWith('.png'))
+            .map((f: any) => {
+                // Determine logic to swap resolution
+                // Original name is 1024/Hex.png or just Hex.png inside the json "name" field
+                // The json "name" from the raw file list is just the filename usually?
+                // Let's check the json structure you viewed earlier.
+                // It has "path": "1024/..." and "name": "..." 
+
+                const baseName = f.name; // e.g. "0404E8.....png"
+                const nameWithoutExt = baseName.replace('.png', '');
+
+                // Nidorx naming convention for other sizes:
+                // 1024/NAME.png
+                // 256/NAME-256px.png
+                // 64/NAME-64px.png
+
+                return {
+                    name: baseName,
+                    file: `${MATCAP_ROOT}256/${nameWithoutExt}-256px.png`,
+                    category: getMatcapCategory(baseName),
+                    thumb: `${MATCAP_ROOT}64/${nameWithoutExt}-64px.png`
+                };
+            });
+        console.log(`Loaded ${MATCAP_LIBRARY.length} matcaps.`);
+    } catch (e) {
+        console.error('Failed to load matcap library:', e);
+        // Keep default
+    }
+}
+
+// Start loading immediately
+loadMatcapLibrary();
+
+const textureCache: Record<string, THREE.Texture> = {};
+// textureLoader already defined above or we get from global if available. 
+// Actually textureLoader was defined in main scope, let's just use it or create new if scope issue.
+// Global textureLoader is at line ~350, so it should be visible here.
+const defaultMatcapUrl = 'https://raw.githubusercontent.com/nidorx/matcaps/master/256/D5D5D5_929292_ACACAC_B4B4B4-256px.png';
+const matcapTexture = textureLoader.load(defaultMatcapUrl);
+
+function getMatcapTexture(url: string | undefined): THREE.Texture {
+    if (!url) return matcapTexture; // Default ceramic
+
+    if (!textureCache[url]) {
+        textureCache[url] = textureLoader.load(url);
+    }
+    return textureCache[url];
+}
+
 
 
 // Stats Presets
@@ -584,15 +795,14 @@ const PLAYER_STATS: BeybladeStats = {
     sta: 1,
     spd: 60,
     spl: 0,
-    crtAtk: 20, // Critical Damage
+    crtAtk: 20, // 2x Atk explicitly
+    frictionAir: 0.02, // FRICTION_LOW
     restitution: 0.1,
     friction: 0.2,
-    frictionAir: FRICTION_LOW,
     densityBase: 0.05,
-    // Arena Forces
-    dishForce: DISH_LOW,  // Normal dish effect
-    curlForce: CURL_LOW,  // Moderate curl
-    // Visuals (Blue Theme)
+    radius: 30, // Standard size
+    height: 10,
+    // Visuals (Blue Theme from Pool)
     beyScale: 1.0,
     wheelColor: 0x888888,
     ringColor: 0x0088ff, // Blue
@@ -603,7 +813,12 @@ const PLAYER_STATS: BeybladeStats = {
     spinTrackColor: 0x222222,
     spinTrackSize: 1.0,
     tipColor: 0x333333,
-    tipSize: 1.0
+    tipSize: 1.0,
+    trailColor: 0x00ffff, // Default Cyan
+    // Arena Forces
+    dishForce: 2, // DISH_LOW
+    curlForce: 1, // CURL_LOW
+    dragFactor: 0.000
 };
 
 const ENEMY_STATS: BeybladeStats = {
@@ -614,15 +829,15 @@ const ENEMY_STATS: BeybladeStats = {
     sta: 1,
     spd: 60,
     spl: 0,
-    crtAtk: 20, // Critical Damage
+    crtAtk: 20, // 2x Atk
+    crt: 0.2, // Pool branch crit chance
+    frictionAir: 0.02, // FRICTION_LOW
     restitution: 0.1,
     friction: 0.2,
-    frictionAir: FRICTION_LOW,
     densityBase: 0.05,
-    // Arena Forces
-    dishForce: DISH_LOW,  // Normal dish effect
-    curlForce: CURL_LOW,  // Moderate curl
-    // Visuals (Orange Theme)
+    radius: 30, // Standard size
+    height: 10,
+    // Visuals (Orange Theme from Pool)
     beyScale: 1.0,
     wheelColor: 0x888888,
     ringColor: 0xff6600, // Orange
@@ -633,19 +848,54 @@ const ENEMY_STATS: BeybladeStats = {
     spinTrackColor: 0x222222,
     spinTrackSize: 1.0,
     tipColor: 0x333333,
-    tipSize: 1.0
+    tipSize: 1.0,
+    trailColor: 0x00ffff, // Main Cyan
+    // Arena Forces
+    dishForce: 2, // DISH_LOW
+    curlForce: 1, // CURL_LOW
+    dragFactor: 0.000
 };
+
+// Defaults for Reset
+const DEFAULT_PLAYER_STATS = JSON.parse(JSON.stringify(PLAYER_STATS));
+const DEFAULT_ENEMY_STATS = JSON.parse(JSON.stringify(ENEMY_STATS));
+
+function savePresets() {
+    localStorage.setItem('bblade_player_stats', JSON.stringify(PLAYER_STATS));
+    localStorage.setItem('bblade_enemy_stats', JSON.stringify(ENEMY_STATS));
+}
 
 function loadPresets() {
     const pData = localStorage.getItem('bblade_player_stats');
+    if (pData) {
+        // Merge with default to ensure new fields are present
+        const parsed = JSON.parse(pData);
+        Object.assign(PLAYER_STATS, { ...DEFAULT_PLAYER_STATS, ...parsed });
+    }
     const eData = localStorage.getItem('bblade_enemy_stats');
-    if (pData) Object.assign(PLAYER_STATS, JSON.parse(pData));
-    if (eData) Object.assign(ENEMY_STATS, JSON.parse(eData));
+    if (eData) {
+        const parsed = JSON.parse(eData);
+        Object.assign(ENEMY_STATS, { ...DEFAULT_ENEMY_STATS, ...parsed });
+    }
 }
 
-// Load on Startup
+// Load Immediately
 loadPresets();
 
+const VISUAL_FIELDS = [
+    { key: 'beyScale', label: 'SCALE', hint: 'Size', type: 'number', step: 0.1 },
+    { key: 'wheelColor', label: 'WHEEL', hint: 'Hex', type: 'color' },
+    { key: 'ringColor', label: 'RING', hint: 'Hex', type: 'color' },
+    { key: 'ringRadiusFactor', label: 'RING RADIUS', hint: 'Size factor', type: 'number', step: 0.05 },
+    { key: 'ringSides', label: 'RING SIDES', hint: 'Shape sides', type: 'number', step: 1 },
+    { key: 'boltColor', label: 'BOLT', hint: 'Hex', type: 'color' },
+    { key: 'boltSides', label: 'BOLT SIDES', hint: 'Hex/Circle', type: 'number', step: 1 },
+    { key: 'spinTrackColor', label: 'TRACK', hint: 'Hex', type: 'color' },
+    { key: 'spinTrackSize', label: 'ST SIZE', hint: 'Track depth', type: 'number', step: 0.1 },
+    { key: 'tipColor', label: 'TIP', hint: 'Hex', type: 'color' },
+    { key: 'tipSize', label: 'TIP SIZE', hint: 'Radius', type: 'number', step: 0.1 },
+    { key: 'trailColor', label: 'TRAIL', hint: 'Hex', type: 'color' },
+];
 
 function createBeyblade(x: number, y: number, stats: BeybladeStats): GameEntity {
     const density = stats.densityBase * stats.wt;
@@ -663,7 +913,7 @@ function createBeyblade(x: number, y: number, stats: BeybladeStats): GameEntity 
     scene.add(mesh); // Add to scene
 
     // Trail
-    const trail = new TrailSystem(stats.ringColor, scene);
+    const trail = new TrailSystem(stats.trailColor, scene);
 
     // Initial Spawn
     Composite.add(engine.world, body);
@@ -762,17 +1012,37 @@ cycleBtnContainer.style.display = 'none'; // Hidden initially
 uiContainer.appendChild(cycleBtnContainer);
 
 function updatePhysicsFromPattern() {
+    if (!player || !player.body || !player.stats) return;
+
+    // Standard Pattern Logic
     const p = PATTERNS[currentPatternIndex];
-    if (player.stats) {
-        player.stats.dishForce = p.dish;
-        player.stats.curlForce = p.curl;
-        // FrictionAir is drag
-        player.body.frictionAir = p.drag;
-        player.stats.frictionAir = p.drag;
-    }
+    player.stats.dishForce = p.dish;
+    player.stats.curlForce = p.curl;
+    player.body.frictionAir = p.drag;
+    player.stats.frictionAir = p.drag;
 }
 
+// Dive Logic
+const setPattern = (e: Event | null, pattern: number) => {
+    if (e) e.preventDefault(); // Prevent ghost clicks
+    currentPatternIndex = pattern;
+    if (pattern === 1) cycleBtn.classList.add('active');
+    else cycleBtn.classList.remove('active');
+    updatePhysicsFromPattern();
+};
 
+// Input for Dive Mode (Space)
+window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && currentPatternIndex !== 1) {
+        setPattern(null, 1);
+    }
+});
+
+window.addEventListener('keyup', (e) => {
+    if (e.code === 'Space') {
+        setPattern(null, 0);
+    }
+});
 
 const cycleBtn = document.createElement('button');
 cycleBtn.className = 'pattern-btn';
@@ -781,20 +1051,7 @@ cycleBtn.innerHTML = `
     <span class="value">DIVE</span>
 `;
 
-// Hold to Defend Logic
-const setPattern = (e: Event, pattern: number) => {
-    e.preventDefault(); // Prevent ghost clicks
-    currentPatternIndex = pattern;
-    cycleBtn.classList.add('active');
-    updatePatternState();
-};
-
-function updatePatternState() {
-    updatePhysicsFromPattern();
-}
-
-
-// Event Listeners
+// Event Listeners for Button
 cycleBtn.addEventListener('mousedown', (e) => { setPattern(e, 1) });
 cycleBtn.addEventListener('pointerdown', (e) => { setPattern(e, 1) }, { passive: false });
 
@@ -947,22 +1204,18 @@ Events.on(engine, 'collisionStart', (event) => {
             // Sparks & Sound
             const isHighSpeed = isCritA || isCritB;
 
-            // Determine "Attacker" (who is moving faster?)
-            // Default to white/gray for low speed bumps
-            let sparkColor = 0xdddddd;
-
-            if (isHighSpeed) {
-                // Use color of the faster bey
-                sparkColor = speedA > speedB ? entityA.stats.ringColor : entityB.stats.ringColor;
-            }
-
             const count = isHighSpeed ? 15 : 3;
             const speed = isHighSpeed ? 5 : 2;
 
             if (pair.collision.supports.length > 0) {
                 const { x, y } = pair.collision.supports[0];
                 for (let i = 0; i < count; i++) {
-                    createSpark(x, y, sparkColor, speed);
+                    if (isCritA)
+                        createSpark(x, y, entityA.stats.trailColor, speed);
+                    if (isCritB)
+                        createSpark(x, y, entityB.stats.trailColor, speed);
+                    if (!isCritA && !isCritB)
+                        createSpark(x, y, 0xaaaaaa, speed);
                 }
             }
             if (isHighSpeed)
@@ -1027,7 +1280,7 @@ function animate() {
                         if (Math.random() < 0.3) {
                             // Spark at contact point (approximate ground contact)
                             // We can use current position, maybe slightly offset opposite to velocity
-                            createSpark(px, py, entity.stats.ringColor, 2);
+                            createSpark(px, py, entity.stats.trailColor, 2);
                         }
                     }
 
@@ -1281,7 +1534,435 @@ function animate() {
 
 
 }
+// --- Visual Forge Helpers ---
+
+function createInput(id: string, label: string, value: any, hint: string, type: string, step: number | string, onChange: (val: any) => void) {
+    const div = document.createElement('div');
+    div.className = 'stat-item';
+
+    // Handle color values (hex num to #hex str)
+    let displayValue = value;
+    if (type === 'color') {
+        const safeVal = value ?? 0; // Fallback to black if undefined
+        displayValue = '#' + safeVal.toString(16).padStart(6, '0');
+    }
+
+    div.innerHTML = `
+        <label class="stat-label" for="${id}">${label}</label>
+        <input class="stat-input" type="${type}" ${type === 'number' ? `step="${step}"` : ''} id="${id}" value="${displayValue}">
+        <span class="stat-hint">${hint}</span>
+    `;
+
+    const input = div.querySelector('input')!;
+    input.addEventListener('input', (e) => {
+        let val: any = (e.target as HTMLInputElement).value;
+        if (type === 'number') val = parseFloat(val);
+        if (type === 'color') val = parseInt(val.replace('#', ''), 16);
+        onChange(val);
+    });
+
+    return div;
+}
+
+// Preview Scene Helper
+// WebGL Renderer Pool (max 3 contexts to prevent exhaustion)
+const rendererPool: THREE.WebGLRenderer[] = [];
+const MAX_RENDERERS = 3;
+let totalCreatedRenderers = 0;
+
+function getOrCreateRenderer(): THREE.WebGLRenderer {
+    // Try to reuse an existing renderer
+    if (rendererPool.length > 0) {
+        return rendererPool.pop()!;
+    }
+
+    // Create new renderer if under limit
+    if (totalCreatedRenderers < MAX_RENDERERS) {
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        totalCreatedRenderers++;
+        // console.log(`Created new renderer. Total: ${totalCreatedRenderers}`);
+        return renderer;
+    }
+
+    // Fallback: create without adding to pool (shouldn't happen)
+    console.warn('Renderer pool exhausted, creating temporary renderer');
+    return new THREE.WebGLRenderer({ antialias: true, alpha: true });
+}
+
+function returnRenderer(renderer: THREE.WebGLRenderer) {
+    // Clear the renderer's DOM parent
+    if (renderer.domElement.parentNode) {
+        renderer.domElement.parentNode.removeChild(renderer.domElement);
+    }
+
+    // Return to pool if under limit
+    if (rendererPool.length < MAX_RENDERERS) {
+        rendererPool.push(renderer);
+    } else {
+        // Dispose if pool is full
+        renderer.dispose();
+    }
+}
+
+let previewRenderer: THREE.WebGLRenderer | null = null;
+let previewScene: THREE.Scene | null = null;
+let previewCamera: THREE.PerspectiveCamera | null = null;
+let previewBeyblade: { mesh: THREE.Group, tiltGroup: THREE.Group, spinGroup: THREE.Group } | null = null;
+
+function updatePreview(stats: BeybladeStats) {
+    if (!previewScene) return;
+    if (previewBeyblade) {
+        previewScene.remove(previewBeyblade.mesh);
+    }
+    previewBeyblade = createBeybladeMesh(stats);
+    previewScene.add(previewBeyblade.mesh);
+}
+
+// --- Stat Changer UI ---
+function openStatEditor(targetStats: BeybladeStats, targetName: string) {
+    try {
+        let previewControls: OrbitControls | null = null;
+        // Create a working copy of stats so we don't apply immediately
+        const tempStats = JSON.parse(JSON.stringify(targetStats));
+
+
+        const dialog = document.createElement('dialog');
+        dialog.className = 'stat-editor-dialog';
+
+        const container = document.createElement('div');
+        container.className = 'dialog-container';
+        dialog.appendChild(container);
+
+        const header = document.createElement('div');
+        header.className = 'modal-header';
+        header.innerHTML = `<span class="modal-title">Customise ${targetName}</span>`;
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'modal-close';
+        closeBtn.innerText = '×';
+        closeBtn.onclick = () => {
+            dialog.close();
+        };
+        header.appendChild(closeBtn);
+        container.appendChild(header);
+
+        // --- Visual Forge Section (Compact & Wrapped) ---
+        const vSection = document.createElement('div');
+        vSection.className = 'stat-section';
+        vSection.innerHTML = `<div class="section-title">Visual</div>`;
+
+        const vContainer = document.createElement('div');
+        vContainer.className = 'forge-container';
+        vSection.appendChild(vContainer);
+
+        // 1. Preview (Floated Left)
+        const previewContainer = document.createElement('div');
+        previewContainer.className = 'preview-float';
+        vContainer.appendChild(previewContainer);
+
+        VISUAL_FIELDS.forEach(field => {
+            try {
+                // Custom compact input creation
+                const div = createInput(
+                    `v-${field.key}`,
+                    field.label,
+                    (targetStats as any)[field.key], // Use targetStats for initial display
+                    field.hint,
+                    field.type,
+                    field.step || 1,
+                    (val) => {
+                        (tempStats as any)[field.key] = val;
+                        updatePreview(tempStats);
+                    }
+                );
+                vContainer.appendChild(div);
+            } catch (e) {
+                console.error('Error creating input for field:', field.key, e);
+            }
+        });
+        container.appendChild(vSection);
+
+
+        // Setup Preview Scene
+        requestAnimationFrame(() => {
+            const width = previewContainer.clientWidth;
+            const height = previewContainer.clientHeight;
+
+            // Get renderer from pool instead of creating new one
+            previewRenderer = getOrCreateRenderer();
+            previewRenderer.setSize(width, height);
+            previewRenderer.setClearColor(0x000000, 0); // Transparent background
+            previewContainer.appendChild(previewRenderer.domElement);
+
+            previewScene = new THREE.Scene();
+            previewCamera = new THREE.PerspectiveCamera(50, width / height, 1, 1000);
+            previewCamera.position.set(0, 40, 60);
+            previewCamera.lookAt(0, 5, 0);
+
+            // Orbit Controls for Preview
+            previewControls = new OrbitControls(previewCamera, previewRenderer.domElement);
+            previewControls.enableDamping = false; // User requested removal
+
+            // Lights
+            const ambient = new THREE.AmbientLight(0xffffff, 1.5);
+            previewScene.add(ambient);
+            const dir = new THREE.DirectionalLight(0xffffff, 2);
+            dir.position.set(10, 50, 20);
+            previewScene.add(dir);
+
+            updatePreview(tempStats);
+
+            function animatePreview() {
+                if (!previewRenderer) return;
+                requestAnimationFrame(animatePreview);
+
+                if (previewControls) previewControls.update();
+
+                // No rotation as requested
+                // if (previewBeyblade) {
+                //     previewBeyblade.spinGroup.rotation.y += 0.02;
+                // }
+
+                previewRenderer.render(previewScene!, previewCamera!);
+            }
+            animatePreview();
+        });
+
+        // --- Visual Forge (Multi-Part Matcap Selector) ---
+        const matcapSection = document.createElement('div');
+        matcapSection.className = 'stat-section';
+        matcapSection.innerHTML = `<div class=\"section-title\">Material</div>`;
+
+        // 1. Part Selector Tabs
+        const parts = [
+            { id: 'wheel', label: 'Wheel' },
+            { id: 'ring', label: 'Ring' },
+            { id: 'bolt', label: 'Bolt' },
+            { id: 'spinTrack', label: 'Track' },
+            { id: 'tip', label: 'Tip' }
+        ];
+        let activePart = 'wheel'; // Default selection
+
+        const tabContainer = document.createElement('div');
+        tabContainer.style.display = 'flex';
+        tabContainer.style.gap = '5px';
+        tabContainer.style.marginBottom = '10px';
+
+        parts.forEach(p => {
+            const tab = document.createElement('button');
+            tab.innerText = p.label;
+            tab.className = 'editor-btn';
+            tab.style.flex = '1';
+            tab.style.padding = '5px';
+            tab.style.fontSize = '12px';
+            if (p.id === activePart) tab.style.background = '#444'; // Highlight active
+
+            tab.onclick = () => {
+                console.log('Tab clicked:', p.id);
+                activePart = p.id;
+                // Update tab styles
+                Array.from(tabContainer.children).forEach((c: any) => c.style.background = '#222');
+                tab.style.background = '#444';
+                renderMatcapGrid(); // Refresh grid state
+            };
+            tabContainer.appendChild(tab);
+        });
+        matcapSection.appendChild(tabContainer);
+
+        // 2. Matcap Grid Container
+        const matcapGrid = document.createElement('div');
+        matcapGrid.style.display = 'grid';
+        matcapGrid.style.gridTemplateColumns = 'repeat(5, 1fr)';
+        matcapGrid.style.gap = '8px';
+        matcapGrid.style.maxHeight = '200px';
+        matcapGrid.style.overflowY = 'auto';
+        matcapGrid.style.marginBottom = '15px';
+        matcapSection.appendChild(matcapGrid);
+
+        // Function to render grid based on library
+        function renderMatcapGrid() {
+            console.log('Rendering grid for:', activePart, 'Library size:', MATCAP_LIBRARY.length);
+            matcapGrid.innerHTML = '';
+
+            // Allow "No Matcap" option (Clear)
+            const clearBtn = document.createElement('div');
+            clearBtn.innerText = 'X';
+            clearBtn.className = 'matcap-btn';
+            clearBtn.style.background = '#333';
+            clearBtn.style.color = '#fff';
+            clearBtn.style.display = 'flex';
+            clearBtn.style.alignItems = 'center';
+            clearBtn.style.justifyContent = 'center';
+            clearBtn.onclick = () => {
+                if (!tempStats.partMatcaps) tempStats.partMatcaps = {};
+                delete tempStats.partMatcaps[activePart];
+                updatePreview(tempStats);
+            };
+            matcapGrid.appendChild(clearBtn);
+
+            MATCAP_LIBRARY.forEach(mc => {
+                // UI uses 64px thumb
+                const thumbUrl = mc.thumb;
+                // Application uses 256px full
+                const fullUrl = mc.file;
+
+                const btn = document.createElement('div');
+                btn.className = 'matcap-btn';
+                btn.title = `${mc.category}: ${mc.name}`;
+                btn.style.width = '100%';
+                btn.style.aspectRatio = '1';
+                btn.style.borderRadius = '50%';
+                btn.style.cursor = 'pointer';
+                btn.style.background = `url(${thumbUrl})`;
+                btn.style.backgroundSize = 'cover';
+                btn.style.border = '2px solid transparent';
+                btn.style.boxShadow = '0 2px 5px rgba(0,0,0,0.5)';
+
+                // Highlight if currently selected for this part (compare against fullUrl)
+                const currentVal = tempStats.partMatcaps?.[activePart];
+                if (currentVal === fullUrl) {
+                    btn.style.border = '2px solid #fff';
+                }
+
+                btn.onclick = () => {
+                    const prev = matcapGrid.querySelectorAll('.matcap-btn');
+                    prev.forEach(p => (p as HTMLElement).style.border = '2px solid transparent');
+                    btn.style.border = '2px solid #fff';
+
+                    if (!tempStats.partMatcaps) tempStats.partMatcaps = {};
+                    tempStats.partMatcaps[activePart] = fullUrl; // Save high res
+                    updatePreview(tempStats);
+                };
+
+                matcapGrid.appendChild(btn);
+            });
+        }
+
+        renderMatcapGrid(); // Initial render
+        container.appendChild(matcapSection);
+
+        // --- Combat Stats Section ---
+        const pSection = document.createElement('div');
+        pSection.className = 'stat-section';
+        pSection.innerHTML = `<div class="section-title">Combat Logic</div>`;
+
+        const pGrid = document.createElement('div');
+        pGrid.className = 'stat-grid';
+
+        const combatFields = [
+            { key: 'atk', label: 'ATTACK', hint: 'Damage', type: 'number', step: 1 },
+            { key: 'def', label: 'DEFENSE', hint: 'Resistance', type: 'number', step: 1 },
+            { key: 'sta', label: 'STAMINA', hint: 'Endurance', type: 'number', step: 1 },
+            { key: 'spd', label: 'SPEED', hint: 'Velocity', type: 'number', step: 1 },
+            { key: 'wt', label: 'WEIGHT', hint: 'Mass', type: 'number', step: 0.1 },
+            { key: 'crtAtk', label: 'CRIT ATK', hint: 'Crit Dmg', type: 'number', step: 1 },
+        ];
+
+        combatFields.forEach(field => {
+            pGrid.appendChild(createInput(
+                `p-${field.key}`,
+                field.label,
+                (targetStats as any)[field.key],
+                field.hint,
+                field.type,
+                field.step,
+                (val) => {
+                    (tempStats as any)[field.key] = val;
+                }
+            ));
+        });
+        pSection.appendChild(pGrid);
+        container.appendChild(pSection);
+
+        // Actions
+        const actions = document.createElement('div');
+        actions.className = 'preset-actions';
+
+        const resetBtn = document.createElement('button');
+        resetBtn.className = 'action-btn reset';
+        resetBtn.innerText = 'RESET DEFAULTS';
+        resetBtn.style.flex = '0 0 auto';
+
+        resetBtn.onclick = () => {
+            if (confirm(`Reset ${targetName} to defaults? This cannot be undone.`)) {
+                if (targetName === 'Player') Object.assign(targetStats, DEFAULT_PLAYER_STATS);
+                if (targetName === 'CPU') Object.assign(targetStats, DEFAULT_ENEMY_STATS);
+
+                // Update snapshot so resetMatch uses new defaults
+                if (targetName === 'Player') matchStartPlayerStats = JSON.parse(JSON.stringify(DEFAULT_PLAYER_STATS));
+                if (targetName === 'CPU') matchStartEnemyStats = JSON.parse(JSON.stringify(DEFAULT_ENEMY_STATS));
+
+                savePresets();
+                dialog.close();
+                resetMatch();
+            }
+        };
+
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'action-btn save';
+        saveBtn.textContent = 'SAVE & APPLY';
+
+        saveBtn.onclick = () => {
+            // Apply temp stats to target
+            Object.assign(targetStats, tempStats);
+
+            // Update snapshot so resetMatch uses new stats
+            if (targetName === 'Player') matchStartPlayerStats = JSON.parse(JSON.stringify(targetStats));
+            if (targetName === 'CPU') matchStartEnemyStats = JSON.parse(JSON.stringify(targetStats));
+
+            savePresets();
+            dialog.close();
+            resetMatch();
+        };
+
+        actions.appendChild(resetBtn);
+        actions.appendChild(saveBtn);
+        container.appendChild(actions);
+
+        // Handle Dialog Close Event for Cleanup
+        dialog.addEventListener('close', () => {
+            if (previewRenderer) {
+                returnRenderer(previewRenderer);
+                previewRenderer = null;
+            }
+            if (previewControls) {
+                previewControls.dispose();
+                previewControls = null;
+            }
+            if (dialog.parentNode) {
+                dialog.parentNode.removeChild(dialog);
+            }
+        });
+
+        document.body.appendChild(dialog);
+        dialog.showModal();
+
+    } catch (e) {
+        console.error('Error opening stat editor:', e);
+    }
+}
+
+// Hook up buttons
+const p1Btn = document.getElementById('p1-btn');
+const cpuBtn = document.getElementById('cpu-btn');
+
+if (p1Btn) {
+    p1Btn.onclick = () => {
+        openStatEditor(PLAYER_STATS, 'Player');
+    };
+} else {
+    console.error('P1 Btn not found!');
+}
+
+if (cpuBtn) {
+    cpuBtn.onclick = () => {
+        openStatEditor(ENEMY_STATS, 'CPU');
+    };
+}
+
 animate();
+
 
 
 // --- Input Processing ---
@@ -1415,7 +2096,7 @@ const resetEntityVisualsAndPhysics = (entity: GameEntity, stats: BeybladeStats, 
 
     // 4. Update Trail Color
     if (entity.trail && entity.trail.mesh.material instanceof THREE.LineBasicMaterial) {
-        entity.trail.mesh.material.color.setHex(stats.ringColor);
+        entity.trail.mesh.material.color.setHex(stats.trailColor);
         entity.trail.clear();
     }
 
