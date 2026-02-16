@@ -549,31 +549,32 @@ interface PowerUp {
     apply: (entity: GameEntity) => void;
 }
 
+// Physics Constants
+const FRICTION_LOW = 0.02;
+const FRICTION_HIGH = 0.1;
+
+const DISH_LOW = 2;
+const DISH_HIGH = 5;
+
+const CURL_LOW = 1;
+const CURL_HIGH = 50;
+
 // Power-Up Type Definitions
 const POWERUP_TYPES: PowerUp[] = [
     {
-        id: 'rpm_boost',
-        label: 'RPM +100',
-        detail: 'Spin Speed',
-        apply: (entity) => {
-            if (entity.stats) entity.stats.maxRpm += 100;
-            if (entity.currentRpm !== undefined) entity.currentRpm += 100;
-        }
-    },
-    {
         id: 'atk_boost',
-        label: 'ATK +5',
+        label: 'ATK +2',
         detail: 'Increased Dmg',
         apply: (entity) => {
-            if (entity.stats) entity.stats.atk += 5;
+            if (entity.stats) entity.stats.atk += 2;
         }
     },
     {
         id: 'def_boost',
-        label: 'DEF +5',
+        label: 'DEF +2',
         detail: 'Reduced Dmg',
         apply: (entity) => {
-            if (entity.stats) entity.stats.def += 5;
+            if (entity.stats) entity.stats.def += 2;
         }
     },
     {
@@ -593,57 +594,34 @@ const POWERUP_TYPES: PowerUp[] = [
         }
     },
     {
-        id: 'drag_high',
-        label: 'DRAG High',
-        detail: 'Air Friction',
+        id: 'swap_drag',
+        label: 'Swap D',
+        detail: 'Drag',
         apply: (entity) => {
             if (entity.stats) {
-                entity.stats.frictionAir = 0.01;
+                entity.stats.frictionAir = (entity.stats.frictionAir !== FRICTION_LOW) ? FRICTION_LOW : FRICTION_HIGH;
                 entity.body.frictionAir = entity.stats.frictionAir;
             }
         }
     },
     {
-        id: 'drag_low',
-        label: 'DRAG Low',
-        detail: 'Air Friction',
+        id: 'swap_radial',
+        label: 'Swap R',
+        detail: 'Radial',
         apply: (entity) => {
             if (entity.stats) {
-                entity.stats.frictionAir = 0.005;
-                entity.body.frictionAir = entity.stats.frictionAir;
+                entity.stats.dishForce = (entity.stats.dishForce !== DISH_LOW) ? DISH_LOW : DISH_HIGH;
             }
         }
     },
     {
-        id: 'dish_high',
-        label: 'DISH High',
-        detail: 'Dish=2',
+        id: 'swap_tangent',
+        label: 'Swap T',
+        detail: 'Tangential',
         apply: (entity) => {
-            if (entity.stats) entity.stats.dishForce = 2;
-        }
-    },
-    {
-        id: 'dish_low',
-        label: 'DISH Low',
-        detail: 'Dish=1',
-        apply: (entity) => {
-            if (entity.stats) entity.stats.dishForce = 1;
-        }
-    },
-    {
-        id: 'curl_increase',
-        label: 'CURL High',
-        detail: 'curl=10',
-        apply: (entity) => {
-            if (entity.stats) entity.stats.curlForce = 10;
-        }
-    },
-    {
-        id: 'curl_decrease',
-        label: 'CURL Low',
-        detail: 'curl=1',
-        apply: (entity) => {
-            if (entity.stats) entity.stats.curlForce = 1;
+            if (entity.stats) {
+                entity.stats.curlForce = (entity.stats.curlForce !== CURL_LOW) ? CURL_LOW : CURL_HIGH;
+            }
         }
     }
 ];
@@ -654,17 +632,13 @@ interface PoolConfig {
 }
 
 const DEFAULT_POOL_CONFIG: PoolConfig = {
-    'rpm_boost': 3,
     'atk_boost': 3,
     'def_boost': 3,
     'sta_drain': 2,
     'crit_boost': 2,
-    'drag_high': 2,
-    'drag_low': 2,
-    'dish_high': 2,
-    'dish_low': 2,
-    'curl_high': 2,
-    'curl_low': 2
+    'swap_drag': 4,
+    'swap_radial': 4,
+    'swap_tangent': 4
 };
 
 class PowerUpPool {
@@ -724,8 +698,8 @@ let powerUpPool = new PowerUpPool();
 // Stats Presets
 const PLAYER_STATS: BeybladeStats = {
     maxRpm: 1000,
-    atk: 30,
-    def: 20,
+    atk: 10,
+    def: 5,
     wt: 1.0,
     sta: 1,
     spd: 60,
@@ -733,11 +707,11 @@ const PLAYER_STATS: BeybladeStats = {
     crt: 0.2,
     restitution: 0.1,
     friction: 0.2,
-    frictionAir: 0.001,
+    frictionAir: FRICTION_LOW,
     densityBase: 0.05,
     // Arena Forces
-    dishForce: 2,  // Normal dish effect
-    curlForce: 1,  // Moderate curl
+    dishForce: DISH_LOW,  // Normal dish effect
+    curlForce: CURL_LOW,  // Moderate curl
     // Visuals (Blue Theme)
     beyScale: 1.0,
     wheelColor: 0x888888,
@@ -754,8 +728,8 @@ const PLAYER_STATS: BeybladeStats = {
 
 const ENEMY_STATS: BeybladeStats = {
     maxRpm: 1000,
-    atk: 30,
-    def: 20,
+    atk: 10,
+    def: 5,
     wt: 1.0,
     sta: 1,
     spd: 60,
@@ -763,11 +737,11 @@ const ENEMY_STATS: BeybladeStats = {
     crt: 0.2,
     restitution: 0.1,
     friction: 0.2,
-    frictionAir: 0.001,
+    frictionAir: FRICTION_LOW,
     densityBase: 0.05,
     // Arena Forces
-    dishForce: 2,  // Normal dish effect
-    curlForce: 1,  // Moderate curl
+    dishForce: DISH_LOW,  // Normal dish effect
+    curlForce: CURL_LOW,  // Moderate curl
     // Visuals (Orange Theme)
     beyScale: 1.0,
     wheelColor: 0x888888,
@@ -1758,7 +1732,7 @@ function animate() {
                     // const life = entity.currentRpm / entity.stats.maxRpm;
                     // Calculate force magnitudes
                     const dishMagnitude = FORCE_CONSTANT * entity.body.mass * dist * entity.stats.dishForce;
-                    const curlMagnitude = FORCE_CONSTANT * entity.body.mass * entity.stats.curlForce;
+                    const curlMagnitude = FORCE_CONSTANT * entity.body.mass * (1 - dist / ARENA_RADIUS) * entity.stats.curlForce;
 
                     // Apply combined force
                     Body.applyForce(entity.body, entity.body.position, {
