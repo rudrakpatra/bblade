@@ -1,11 +1,9 @@
-import { inject } from '@vercel/analytics';
-
 import Matter from 'matter-js';
+import { inject, track } from '@vercel/analytics';
 import Peer, { type DataConnection, type PeerOptions } from 'peerjs';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-
 import "./style.css";
 
 // Initialize Vercel Analytics with configuration
@@ -13,6 +11,16 @@ inject({
   mode: import.meta.env.MODE === 'production' ? 'production' : 'development',
   debug: import.meta.env.MODE !== 'production'
 });
+
+type TAnalyticsProps = Record<string, string | number | boolean>;
+
+function trackGameEvent(name: string, props: TAnalyticsProps = {}) {
+    try {
+        track(name, props);
+    } catch {
+        // Analytics must never affect gameplay.
+    }
+}
 
 // --- Physics Setup (Matter.js) ---
 const Engine = Matter.Engine;
@@ -1163,7 +1171,8 @@ const multiplayer = {
     nextStateSyncAt: MULTIPLAYER_STATE_SYNC_INTERVAL_SECONDS,
     diveEventSeq: 0,
     diveQueue: [] as TScheduledDiveEvent[],
-    processedDiveEventIds: new Set<string>()
+    processedDiveEventIds: new Set<string>(),
+    analyticsConnectedTracked: false
 };
 let localPlayMode: TLocalPlayMode = '1p';
 
@@ -1635,6 +1644,7 @@ let tutorialWarningEl: HTMLElement | null = null;
 let tutorialWarningTimeout: number | undefined;
 let tutorialLastWallWarningAt = -Infinity;
 let tutorialInitialAimAngle = DEFAULT_LAUNCH_ANGLE;
+let tutorialCompletionTracked = false;
 let tutorialHighlightEl: HTMLElement | null = null;
 let tutorialLayerEl: HTMLElement | null = null;
 
@@ -1945,6 +1955,8 @@ function setMasterVolume(value: number) {
 function setFlashesEnabled(value: boolean) {
     flashesEnabled = value;
     localStorage.setItem('bblade_flashes_enabled', String(value));
+    trackGameEvent('flash_setting_changed', { enabled: value });
+    if (!value) trackGameEvent('flashes_disabled');
     if (!flashesEnabled) {
         criticalFlashUniforms.uIntensity.value = 0;
         criticalFlashPlane.visible = false;
@@ -2853,8 +2865,27 @@ function fitPreviewCameraToBey() {
 }
 
 // --- Stat Changer UI ---
+function getCustomizationTargetId(targetName: string) {
+    return targetName.toLowerCase() === 'player' ? 'player' : 'opponent';
+}
+
+function stableStringify(value: unknown): string {
+    if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+    if (value && typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
+}
+
 function openStatEditor(targetStats: BeybladeStats, targetName: string) {
     try {
+        const customizationTarget = getCustomizationTargetId(targetName);
+        trackGameEvent('bey_customization_opened', {
+            target: customizationTarget,
+            mode: multiplayer.role !== 'solo' ? 'online' : localPlayMode
+        });
+
         // Create a working copy of stats so we don't apply immediately
         let tempStats = JSON.parse(JSON.stringify(targetStats)) as BeybladeStats;
 
@@ -2985,6 +3016,7 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
         refreshStatMeters();
 
         randomizeBtn.onclick = async () => {
+            trackGameEvent('bey_customization_randomized', { target: customizationTarget });
             randomizeBtn.title = 'Fetching palette';
             randomizeBtn.disabled = true;
             const preset = BEY_PRESETS[Math.floor(Math.random() * BEY_PRESETS.length)];
@@ -3233,6 +3265,7 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
 
         resetBtn.onclick = () => {
             if (confirm(`Reset ${targetName} to defaults? This cannot be undone.`)) {
+                trackGameEvent('bey_customization_reset', { target: customizationTarget });
                 if (targetName === 'Player') Object.assign(targetStats, DEFAULT_PLAYER_STATS);
                 if (targetName === 'CPU') Object.assign(targetStats, DEFAULT_ENEMY_STATS);
 
@@ -3260,8 +3293,21 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
         `;
 
         saveBtn.onclick = () => {
-            // Apply temp stats to target
+            const previousStatsKey = stableStringify(targetStats);
             syncTrailWithBolt(tempStats);
+            const changed = previousStatsKey !== stableStringify(tempStats);
+
+            trackGameEvent('bey_customization_applied', {
+                target: customizationTarget,
+                mode: multiplayer.role !== 'solo' ? 'online' : localPlayMode,
+                changed
+            });
+            if (changed) {
+                trackGameEvent('bey_customized_new', { target: customizationTarget });
+                if (customizationTarget === 'player') trackGameEvent('player_bey_customized_new');
+            }
+
+            // Apply temp stats to target
             Object.assign(targetStats, tempStats);
 
             // Update snapshot so resetMatch uses new stats
@@ -3314,6 +3360,7 @@ const cpuBtn = document.getElementById('cpu-btn');
 
 if (p1Btn) {
     p1Btn.onclick = () => {
+        clearTutorialInstruction();
         openStatEditor(PLAYER_STATS, 'Player');
     };
 } else {
@@ -3323,6 +3370,7 @@ if (p1Btn) {
 if (cpuBtn) {
     cpuBtn.onclick = () => {
         if (multiplayer.role !== 'solo') return;
+        clearTutorialInstruction();
         openStatEditor(ENEMY_STATS, 'CPU');
     };
 }
@@ -3545,17 +3593,37 @@ function startTutorialMode() {
     setGameSpeed('tutorial');
     clearTutorialWarning();
     tutorialLastWallWarningAt = -Infinity;
+    tutorialCompletionTracked = false;
     tutorialModeActive = true;
     tutorialPauseActive = false;
     tutorialSlowMoActive = false;
     tutorialPhase = 'aim';
     tutorialNextPromptAt = 0;
     tutorialInitialAimAngle = currentLaunchAngle.value;
+    trackGameEvent('tutorial_started');
     showTutorialInstruction(
         'Adjust launch angle',
         `Drag AIM left or right until the angle clearly changes. Release after at least ${TUTORIAL_MIN_AIM_DELTA} degrees of movement.`,
         dragZone,
         launchContainer,
+        true,
+        'middle'
+    );
+}
+
+function startCustomizeBeyTutorial() {
+    tutorialModeActive = false;
+    tutorialPauseActive = false;
+    tutorialSlowMoActive = false;
+    tutorialPhase = 'idle';
+    clearTutorialWarning();
+    clearTutorialInstruction();
+    trackGameEvent('customize_tutorial_started');
+    showTutorialInstruction(
+        'Customize bey',
+        'Tap P1 to edit your bey. Before a match, tap CPU or P2 to edit the opponent bey.',
+        hudTopBar,
+        null,
         true,
         'middle'
     );
@@ -3692,6 +3760,10 @@ function updateTutorialFlow(now: number) {
             () => {
                 setGameSpeed('tutorial');
                 clearTutorialWarning();
+                if (!tutorialCompletionTracked) {
+                    tutorialCompletionTracked = true;
+                    trackGameEvent('tutorial_completed');
+                }
                 tutorialPhase = 'complete';
                 tutorialModeActive = false;
             }
@@ -3740,6 +3812,7 @@ function cleanupMultiplayer() {
     multiplayer.localLaunchAngle = DEFAULT_LAUNCH_ANGLE;
     multiplayer.remoteLaunchAngle = DEFAULT_LAUNCH_ANGLE;
     multiplayer.remoteLaunchRequested = false;
+    multiplayer.analyticsConnectedTracked = false;
     setMultiplayerStatus('Offline');
     syncOpponentHudLabel();
     syncLaunchSetupUi();
@@ -3965,10 +4038,22 @@ function finishLocalLaunch() {
     resetHint.style.display = 'block';
 }
 
+function trackGameStarted() {
+    if (multiplayer.role === 'guest') return;
+    trackGameEvent('game_started', {
+        mode: multiplayer.role !== 'solo' ? 'online' : localPlayMode,
+        speed: currentGameSpeed,
+        tutorial: tutorialModeActive,
+        flashes: flashesEnabled,
+        camera_shake: cameraShakeEnabled
+    });
+}
+
 function startLocalSimulatedMatch(localLaunchAngle: number, localOpponentAngle?: number) {
     resetMatchCounters();
     resetMultiplayerDiveQueue();
     hasLaunched = true;
+    trackGameStarted();
     if (tutorialModeActive && tutorialPhase === 'launch') {
         clearTutorialInstruction();
         tutorialPhase = 'waitingDiveMoment';
@@ -4140,6 +4225,10 @@ function bindMultiplayerConnection(conn: DataConnection) {
     multiplayer.conn = conn;
     conn.on('open', () => {
         setMultiplayerStatus('Connected');
+        if (!multiplayer.analyticsConnectedTracked) {
+            multiplayer.analyticsConnectedTracked = true;
+            if (multiplayer.role === 'host') trackGameEvent('online_connected');
+        }
         sendMultiplayerMessage({ type: 'hello', stats: cloneStats(PLAYER_STATS), name: 'Player' });
         sendHostGameSpeed();
         if (multiplayer.localReady) sendMultiplayerReady();
@@ -4151,6 +4240,7 @@ function bindMultiplayerConnection(conn: DataConnection) {
 
 function startMultiplayerHost() {
     cleanupMultiplayer();
+    trackGameEvent('online_attempted', { role: 'host' });
     multiplayer.role = 'host';
     syncOpponentHudLabel();
     setMultiplayerStatus('Hosting');
@@ -4171,6 +4261,7 @@ function startMultiplayerHost() {
 function joinMultiplayerHost(hostPeerId: string) {
     if (!hostPeerId.trim()) return;
     cleanupMultiplayer();
+    trackGameEvent('online_attempted', { role: 'guest' });
     multiplayer.role = 'guest';
     syncOpponentHudLabel();
     setMultiplayerStatus('Joining');
@@ -4305,6 +4396,7 @@ function showMenuDialog() {
             </div>
             <div class="tutorial-actions menu-how-to-play">
                 <button class="action-btn reset" id="menu-tutorial">How to play</button>
+                <button class="action-btn reset" id="menu-customize-tutorial">Customize bey</button>
             </div>
         </div>
     `;
@@ -4353,6 +4445,10 @@ function showMenuDialog() {
     overlay.querySelector('#menu-tutorial')?.addEventListener('click', () => {
         overlay.remove();
         startTutorialMode();
+    });
+    overlay.querySelector('#menu-customize-tutorial')?.addEventListener('click', () => {
+        overlay.remove();
+        startCustomizeBeyTutorial();
     });
 }
 

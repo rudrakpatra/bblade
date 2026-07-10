@@ -686,6 +686,11 @@ button:disabled {
   pointer-events: none;
 }
 
+.tutorial-ui-layer #hud-top-bar.tutorial-highlight {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .tutorial-ui-layer .cycle-container {
   opacity: 1;
   pointer-events: auto;
@@ -963,7 +968,7 @@ button:disabled {
 }
 
 .menu-panel .menu-how-to-play {
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 10px;
 }
 
@@ -1680,6 +1685,10 @@ dialog.visual-customization-dialog::backdrop {
 
   .menu-panel .mode-actions {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .menu-panel .menu-how-to-play {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .multiplayer-lobby-grid {
