@@ -552,6 +552,7 @@ type TVortexUniforms = {
     uTime: { value: number };
     uDirection: { value: number };
     uIntensity: { value: number };
+    uOpacity: { value: number };
     uExpansion: { value: number };
     uTint: { value: THREE.Color };
 };
@@ -561,6 +562,7 @@ function createBeyVortexMaterial(tint: number): THREE.ShaderMaterial {
         uTime: { value: 0 },
         uDirection: { value: 1 },
         uIntensity: { value: 0.46 },
+        uOpacity: { value: 0.035 },
         uExpansion: { value: 1 },
         uTint: { value: new THREE.Color(tint) }
     };
@@ -588,6 +590,7 @@ function createBeyVortexMaterial(tint: number): THREE.ShaderMaterial {
             uniform float uTime;
             uniform float uDirection;
             uniform float uIntensity;
+            uniform float uOpacity;
             uniform vec3 uTint;
             varying vec2 vUv;
             varying vec3 vNormal;
@@ -607,8 +610,9 @@ function createBeyVortexMaterial(tint: number): THREE.ShaderMaterial {
                 float topVanish = pow(1.0 - smoothstep(0.36, 1.0, lift), 1.55);
                 float verticalFade = baseFade * topVanish;
                 float rim = pow(1.0 - abs(dot(normalize(vNormal), vec3(0.0, 0.0, 1.0))), 1.8);
-                float alpha = (cloud * 0.22 + ribbons * 0.34 + rim * 0.18) * verticalFade * uIntensity;
-                vec3 color = mix(vec3(1.0), uTint, 0.68 + cloud * 0.24);
+                float pattern = cloud * 0.16 + ribbons * 0.26 + rim * 0.12;
+                float alpha = pattern * verticalFade * uIntensity * uOpacity;
+                vec3 color = mix(vec3(1.0), uTint, 0.56 + cloud * 0.24);
                 gl_FragColor = vec4(color, alpha);
             }
         `,
@@ -626,7 +630,7 @@ function setBeyVortexColor(mesh: THREE.Object3D, color: number) {
     }
 }
 
-function updateBeyVortex(mesh: THREE.Object3D, time: number, speed = 0, rpm = 0, maxRpm = 1000, direction = 1, tint?: number) {
+function updateBeyVortex(mesh: THREE.Object3D, time: number, speed = 0, rpm = 0, maxRpm = 1000, direction = 1, tint?: number, opacity = 0.035) {
     const uniforms = mesh.userData.vortexUniforms as TVortexUniforms | undefined;
     if (!uniforms) return;
     if (typeof tint === 'number') {
@@ -635,8 +639,11 @@ function updateBeyVortex(mesh: THREE.Object3D, time: number, speed = 0, rpm = 0,
     const rpmRatio = THREE.MathUtils.clamp(rpm / Math.max(1, maxRpm), 0, 1);
     uniforms.uTime.value = time;
     uniforms.uDirection.value = direction;
-    uniforms.uExpansion.value = 0.42 + rpmRatio * 0.58;
-    uniforms.uIntensity.value = THREE.MathUtils.clamp(0.24 + speed * 0.014 + rpmRatio * 0.28, 0.24, 0.78) * 0.25;
+    const opacityValue = THREE.MathUtils.clamp(opacity, 0.015, 0.5);
+    uniforms.uExpansion.value = 0.42 + rpmRatio * 0.58 + opacityValue * 0.7;
+    const baseIntensity = THREE.MathUtils.clamp(0.24 + speed * 0.014 + rpmRatio * 0.28, 0.24, 0.78);
+    uniforms.uIntensity.value = THREE.MathUtils.clamp(baseIntensity, 0.08, 0.9);
+    uniforms.uOpacity.value = opacityValue;
 
     const vortex = mesh.userData.vortex as THREE.Object3D | undefined;
     if (vortex) {
@@ -670,8 +677,12 @@ function createBeybladeMesh(stats: BeybladeStats): { mesh: THREE.Group, tiltGrou
     mesh.add(tiltGroup);
     tiltGroup.add(spinGroup);
 
+    const safeFactor = (value: number | undefined, fallback = 1, min = 0.45, max = 1.8) => {
+        return THREE.MathUtils.clamp(value ?? fallback, min, max);
+    };
+
     // Apply global scale
-    spinGroup.scale.setScalar(stats.beyScale || 1.0);
+    spinGroup.scale.setScalar(safeFactor(stats.beyScale, 1.0, 0.75, 1.35));
 
     const pm = stats.partMatcaps || {};
     const wheelTex = getMatcapTexture(getContrastMatcapUrl(pm.wheel));
@@ -706,7 +717,11 @@ function createBeybladeMesh(stats: BeybladeStats): { mesh: THREE.Group, tiltGrou
     };
 
     // 1. Metal Wheel (Base) - Rounded
-    const wheelGeo = createRoundedCylinder(BEYBLADE_RADIUS, 5, 0.8);
+    const wheelWidthFactor = safeFactor(stats.wheelWidthFactor, 1, 0.82, 1.2);
+    const wheelHeightFactor = safeFactor(stats.wheelHeightFactor, 1, 0.55, 1.65);
+    const wheelRadius = BEYBLADE_RADIUS * wheelWidthFactor;
+    const wheelHeight = 5 * wheelHeightFactor;
+    const wheelGeo = createRoundedCylinder(wheelRadius, wheelHeight, 0.8);
     const wheelMat = new THREE.MeshMatcapMaterial({
         color: stats.wheelColor || 0x888888,
         matcap: wheelTex
@@ -718,7 +733,7 @@ function createBeybladeMesh(stats: BeybladeStats): { mesh: THREE.Group, tiltGrou
 
     const vortexMat = createBeyVortexMaterial(stats.trailColor || stats.boltColor || 0xffffff);
     const vortex = new THREE.Mesh(
-        new THREE.CylinderGeometry(BEYBLADE_RADIUS * 2.0, BEYBLADE_RADIUS, 5, 96, 16, true),
+        new THREE.CylinderGeometry(wheelRadius * 2.0, wheelRadius, 5, 96, 16, true),
         vortexMat
     );
     vortex.name = 'bey-air-vortex';
@@ -731,22 +746,26 @@ function createBeybladeMesh(stats: BeybladeStats): { mesh: THREE.Group, tiltGrou
     mesh.userData.vortexUniforms = vortexMat.uniforms;
 
     // 2. Clear Wheel / Energy Ring - Rounded
-    const ringRadius = BEYBLADE_RADIUS * (stats.ringRadiusFactor || 0.75);
+    const ringRadius = wheelRadius * safeFactor(stats.ringRadiusFactor, 0.75, 0.48, 1.02);
+    const ringWidthFactor = safeFactor(stats.ringWidthFactor, 1, 0.52, 1.55);
+    const ringHeightFactor = safeFactor(stats.ringHeightFactor, 1, 0.48, 1.65);
+    const ringDepth = 3 * ringHeightFactor;
+    const ringHoleFactor = THREE.MathUtils.clamp(0.7 - (ringWidthFactor - 1) * 0.18, 0.42, 0.82);
     const ringShape = new THREE.Shape();
     ringShape.absarc(0, 0, ringRadius, 0, Math.PI * 2, false);
 
     // Create hole for ring
     const holePath = new THREE.Path();
-    holePath.absarc(0, 0, ringRadius * 0.7, 0, Math.PI * 2, true);
+    holePath.absarc(0, 0, ringRadius * ringHoleFactor, 0, Math.PI * 2, true);
     ringShape.holes.push(holePath);
 
     let ringGeo: THREE.BufferGeometry = new THREE.ExtrudeGeometry(ringShape, {
-        depth: 3, // slightly thinner interaction layer
+        depth: ringDepth,
         bevelEnabled: true,
-        bevelThickness: 0.5,
-        bevelSize: 0.5,
-        bevelSegments: 6, // Smoother bevel
-        curveSegments: Math.max(stats.ringSides || 32, 64) // Ensure high curve count unless sides specified
+        bevelThickness: Math.min(0.65, ringDepth * 0.28),
+        bevelSize: Math.min(0.65, ringDepth * 0.28),
+        bevelSegments: 4,
+        curveSegments: Math.max(8, Math.round(stats.ringSides || 32))
     });
     ringGeo.center();
     ringGeo = makeSmooth(ringGeo);
@@ -764,7 +783,10 @@ function createBeybladeMesh(stats: BeybladeStats): { mesh: THREE.Group, tiltGrou
     // 3. Face Bolt - Hexagon with Bevel
     const boltShape = new THREE.Shape();
     const sides = stats.boltSides || 6;
-    const boltRadius = 10;
+    const boltWidthFactor = safeFactor(stats.boltWidthFactor, 1, 0.58, 1.55);
+    const boltHeightFactor = safeFactor(stats.boltHeightFactor, 1, 0.5, 1.8);
+    const boltRadius = 10 * boltWidthFactor;
+    const boltDepth = 4 * boltHeightFactor;
 
     // Draw polygon
     for (let i = 0; i < sides; i++) {
@@ -777,13 +799,13 @@ function createBeybladeMesh(stats: BeybladeStats): { mesh: THREE.Group, tiltGrou
     boltShape.closePath();
 
     let boltGeo: THREE.BufferGeometry = new THREE.ExtrudeGeometry(boltShape, {
-        depth: 4,
+        depth: boltDepth,
         bevelEnabled: true,
         bevelThickness: 1,
         bevelSize: 1,
         bevelSegments: 2
     });
-    boltGeo.center();
+    boltGeo.translate(0, 0, -boltDepth / 2);
     boltGeo = makeSmooth(boltGeo);
 
     const boltMat = new THREE.MeshMatcapMaterial({
@@ -796,10 +818,11 @@ function createBeybladeMesh(stats: BeybladeStats): { mesh: THREE.Group, tiltGrou
     spinGroup.add(bolt);
 
     // 4. Spin Track
-    const stSize = stats.spinTrackSize || 1.0;
+    const stSize = safeFactor(stats.spinTrackSize, 1.0, 0.55, 1.5);
+    const stHeight = 10 * safeFactor(stats.spinTrackHeightFactor, 1, 0.55, 1.7);
     // Use simple cylinder for stem but rounded for base?
     // Let's stick to Cylinder for the stem part as it's intricate
-    let spinTrackGeo: THREE.BufferGeometry = new THREE.CylinderGeometry(BEYBLADE_RADIUS * .3 * stSize, BEYBLADE_RADIUS * .2 * stSize, 10, 32);
+    let spinTrackGeo: THREE.BufferGeometry = new THREE.CylinderGeometry(BEYBLADE_RADIUS * .3 * stSize, BEYBLADE_RADIUS * .2 * stSize, stHeight, 32);
     spinTrackGeo = makeSmooth(spinTrackGeo);
     const spinTrackMat = new THREE.MeshMatcapMaterial({
         color: stats.spinTrackColor || 0x777777,
@@ -810,12 +833,13 @@ function createBeybladeMesh(stats: BeybladeStats): { mesh: THREE.Group, tiltGrou
     spinGroup.add(spinTrack);
 
     // 5. Tip (Driver) - Rounded Tip
-    const tSize = stats.tipSize || 1.0;
+    const tSize = safeFactor(stats.tipSize, 1.0, 0.55, 1.5);
+    const tipHeight = safeFactor(stats.tipHeightFactor, 1, 0.55, 1.8);
     // Lathe for a smooth tip shape
     const tipPoints = [];
     tipPoints.push(new THREE.Vector2(0, 0)); // Bottom contact point (sharp)
-    tipPoints.push(new THREE.Vector2(2 * tSize, 1));
-    tipPoints.push(new THREE.Vector2(5 * tSize, 8)); // Top wide base
+    tipPoints.push(new THREE.Vector2(2 * tSize, 1 * tipHeight));
+    tipPoints.push(new THREE.Vector2(5 * tSize, 8 * tipHeight)); // Top wide base
     let tipGeo: THREE.BufferGeometry = new THREE.LatheGeometry(tipPoints, 32); // Smoother tip
     tipGeo = makeSmooth(tipGeo);
 
@@ -980,21 +1004,35 @@ interface BeybladeStats {
     curlForce: number;  // Multiplier for tangential clockwise force
     // Visual Stats
     beyScale: number;
+    wheelWidthFactor: number;
+    wheelHeightFactor: number;
     wheelColor: number;
     ringColor: number;
     ringSides: number;
     ringRadiusFactor: number;
+    ringWidthFactor: number;
+    ringHeightFactor: number;
     boltColor: number;
     boltSides: number;
+    boltWidthFactor: number;
+    boltHeightFactor: number;
     spinTrackColor: number;
     spinTrackSize: number;
+    spinTrackHeightFactor: number;
     tipColor: number;
     tipSize: number;
+    tipHeightFactor: number;
     dragFactor: number;
 }
 
 type TMatcapPart = keyof NonNullable<BeybladeStats['partMatcaps']>;
 const MATCAP_PART_KEYS: TMatcapPart[] = ['wheel', 'ring', 'bolt', 'spinTrack', 'tip'];
+
+type TLooseBeyPart = {
+    object: THREE.Object3D;
+    velocity: THREE.Vector3;
+    rotationVelocity: THREE.Vector3;
+};
 
 interface GameEntity {
     body: Matter.Body;
@@ -1008,6 +1046,8 @@ interface GameEntity {
     isDead?: boolean;
     driftVelocity?: THREE.Vector3;
     driftRotation?: THREE.Vector3;
+    criticalKo?: boolean;
+    looseParts?: TLooseBeyPart[];
 }
 const entities: GameEntity[] = [];
 
@@ -1019,6 +1059,12 @@ const FRICTION_HIGH = 0.035; // Controlled grip while diving
 const CRIT_SPEED_THRESHOLD = 20;
 const BARRIER_DAMAGE = 20; // Self-damage when hitting walls
 const DIVE_BOOST_FORCE = 0.00012;
+
+type TCriticalOwner = 'player' | 'enemy';
+const criticalStreaks: Record<TCriticalOwner, number> = {
+    player: 0,
+    enemy: 0
+};
 
 type TMatchCounterSide = {
     criticalHits: number;
@@ -1035,6 +1081,7 @@ type TCriticalHitReport = {
     def: number;
     dmg: number;
     rpmLost: number;
+    streak?: number;
 };
 
 type TWallHitReport = {
@@ -1052,12 +1099,76 @@ function resetMatchCounters() {
     matchCounters.player.wallDings = 0;
     matchCounters.enemy.criticalHits = 0;
     matchCounters.enemy.wallDings = 0;
+    resetCriticalStreak();
 }
 
 function getMatchCounterSide(entity: GameEntity): TMatchCounterSide | null {
     if (entity === player) return matchCounters.player;
     if (entity === enemy) return matchCounters.enemy;
     return null;
+}
+
+function getCriticalOwner(entity: GameEntity): TCriticalOwner | null {
+    if (entity === player) return 'player';
+    if (entity === enemy) return 'enemy';
+    return null;
+}
+
+function syncCriticalStreakHud() {
+    const targets: Array<{ owner: TCriticalOwner; buttonId: string }> = [
+        { owner: 'player', buttonId: 'p1-btn' },
+        { owner: 'enemy', buttonId: 'cpu-btn' }
+    ];
+
+    targets.forEach(({ owner, buttonId }) => {
+        const button = document.getElementById(buttonId);
+        if (!button) return;
+        const active = criticalStreaks[owner] > 0;
+        button.classList.toggle('crit-streak-active', active);
+        if (active) button.setAttribute('data-crit-streak', `x${criticalStreaks[owner]}`);
+        else button.removeAttribute('data-crit-streak');
+    });
+}
+
+function resetCriticalStreak(owner?: TCriticalOwner | null) {
+    if (owner) {
+        criticalStreaks[owner] = 0;
+        syncCriticalStreakHud();
+        return;
+    }
+
+    criticalStreaks.player = 0;
+    criticalStreaks.enemy = 0;
+    syncCriticalStreakHud();
+}
+
+function registerCriticalStreak(entity: GameEntity) {
+    const owner = getCriticalOwner(entity);
+    if (!owner) return 1;
+
+    criticalStreaks[owner] += 1;
+    syncCriticalStreakHud();
+    return criticalStreaks[owner];
+}
+
+function getCriticalStreak(entity: GameEntity) {
+    const owner = getCriticalOwner(entity);
+    return owner ? criticalStreaks[owner] : 0;
+}
+
+function updateCriticalStreakForHit(entity: GameEntity, isCritical: boolean) {
+    if (isCritical) return registerCriticalStreak(entity);
+    resetCriticalStreak(getCriticalOwner(entity));
+    return 0;
+}
+
+function getCriticalDamageMultiplier(stats: BeybladeStats) {
+    return THREE.MathUtils.clamp(stats.crtAtk / Math.max(1, stats.atk), 1.05, 3);
+}
+
+function applyCriticalStreakDamage(baseDamage: number, attacker: GameEntity, streak: number) {
+    if (!attacker.stats) return baseDamage;
+    return baseDamage * Math.pow(getCriticalDamageMultiplier(attacker.stats), streak);
 }
 
 
@@ -1085,6 +1196,8 @@ let currentPatternIndex = 0;
 let cpuPatternIndex = 0;
 let localDiveIntent = 0;
 let cpuDiveIntent = 0;
+let cpuLastWallHitAt = -Infinity;
+let cpuHardAiLastReason = 'idle';
 
 type TGameSpeedId = 'tutorial' | 'normal' | 'insane';
 
@@ -1111,6 +1224,14 @@ let masterVolume = Number.isFinite(savedMasterVolume) ? THREE.MathUtils.clamp(sa
 let flashesEnabled = localStorage.getItem('bblade_flashes_enabled') !== 'false';
 let cameraShakeEnabled = localStorage.getItem('bblade_camera_shake_enabled') !== 'false';
 let cpuNextDiveSwitchAt = 0;
+let finishSlowMoUntil = 0;
+let pendingKoBlankTimeout: number | null = null;
+let pendingWinnerTimeout: number | null = null;
+let activeKoBlankOverlay: HTMLElement | null = null;
+const KO_FINISH_DURATION_SECONDS = 3;
+const KO_WINNER_BLANK_SECONDS = 2;
+const KO_FINISH_DRIFT_SCALE = 0.08;
+const KO_FINISH_ROTATION_SCALE = 0.18;
 
 declare global {
     interface Window {
@@ -1124,7 +1245,7 @@ declare global {
 
 type TMultiplayerRole = 'solo' | 'host' | 'guest';
 type TMultiplayerStatus = 'Offline' | 'Hosting' | 'Joining' | 'Connected' | 'Disconnected' | 'Error';
-type TLocalPlayMode = '1p' | '2p';
+type TLocalPlayMode = '1p-easy' | '1p-hard' | '2p';
 type TDiveAction = 'dive_on' | 'dive_off';
 type TScheduledDiveEvent = {
     id: string;
@@ -1174,7 +1295,7 @@ const multiplayer = {
     processedDiveEventIds: new Set<string>(),
     analyticsConnectedTracked: false
 };
-let localPlayMode: TLocalPlayMode = '1p';
+let localPlayMode: TLocalPlayMode = '1p-easy';
 
 // --- Matcap Resources ---
 const ALLOWED_MATCAP_URLS = [
@@ -1194,6 +1315,7 @@ const MATCAP_LIBRARY: { name: string, file: string, category: string, thumb: str
 }));
 const defaultMatcapUrl = ALLOWED_MATCAP_URLS[0];
 const textureCache: Record<string, THREE.Texture> = {};
+const matcapPreviewImageCache: HTMLImageElement[] = [];
 const textureLoader = new THREE.TextureLoader();
 
 function getContrastMatcapUrl(url: string | undefined): string | undefined {
@@ -1208,6 +1330,23 @@ function getMatcapTexture(url: string | undefined): THREE.Texture {
     }
     return textureCache[safeUrl];
 }
+
+function preloadMatcapTextures() {
+    ALLOWED_MATCAP_URLS.forEach((url) => getMatcapTexture(url));
+}
+
+function preloadMatcapPreviews() {
+    MATCAP_LIBRARY.forEach((matcap) => {
+        const image = new Image();
+        image.decoding = 'async';
+        image.loading = 'eager';
+        image.src = matcap.thumb;
+        matcapPreviewImageCache.push(image);
+    });
+}
+
+preloadMatcapTextures();
+preloadMatcapPreviews();
 
 
 
@@ -1383,43 +1522,34 @@ function hslToHex(h: number, s: number, l: number) {
         Math.round((b + m) * 255));
 }
 
-async function fetchProfessionalPalette(): Promise<TPalette> {
-    const baseHue = Math.floor(Math.random() * 360);
-    const sourceColors = [
-        hslToHex(baseHue, 88, 54),
-        hslToHex((baseHue + 32) % 360, 92, 48),
-        hslToHex((baseHue + 174) % 360, 86, 58),
-        hslToHex((baseHue + 248) % 360, 76, 18),
-        hslToHex((baseHue + 54) % 360, 80, 92)
+function createFastSwatchPalette(): TPalette {
+    const harmonySeeds = [
+        { name: 'Solar clash', hue: 6 },
+        { name: 'Volt comet', hue: 42 },
+        { name: 'Aqua flare', hue: 190 },
+        { name: 'Magenta burn', hue: 316 },
+        { name: 'Ruby storm', hue: 350 }
     ];
-    const response = await fetch(`https://api.color.pizza/v1/?values=${sourceColors.map(numberToHex).join(',')}`);
-    const data = await response.json() as {
-        colors?: Array<{ hex?: string }>;
-    };
-    const colors = data.colors
-        ?.map(color => color.hex?.replace('#', ''))
-        .filter((hex): hex is string => Boolean(hex))
-        .map(hex => parseInt(hex, 16));
-
-    if (!colors || colors.length < 5) {
-        throw new Error('Palette service did not return enough colors');
-    }
+    const seed = harmonySeeds[Math.floor(Math.random() * harmonySeeds.length)];
+    const baseHue = (seed.hue + Math.floor(randomFromRange(-10, 11)) + 360) % 360;
 
     return {
-        name: 'Color Pizza Harmony',
-        colors: [colors[0], colors[1], colors[2], colors[3], colors[4]]
+        name: seed.name,
+        colors: [
+            hslToHex(baseHue, 92, 54),
+            hslToHex((baseHue + 32) % 360, 90, 46),
+            hslToHex((baseHue + 178) % 360, 86, 58),
+            hslToHex((baseHue + 246) % 360, 62, 17),
+            hslToHex((baseHue + 54) % 360, 84, 90)
+        ]
     };
 }
 
-async function buildRandomBeyStats(baseStats: BeybladeStats): Promise<BeybladeStats> {
+function buildRandomBeyStats(baseStats: BeybladeStats): BeybladeStats {
     const nextStats = JSON.parse(JSON.stringify(baseStats)) as BeybladeStats;
-    let palette = CURATED_PALETTES[Math.floor(Math.random() * CURATED_PALETTES.length)];
-
-    try {
-        palette = await fetchProfessionalPalette();
-    } catch (error) {
-        console.info('Using curated palette fallback:', error);
-    }
+    const palette = Math.random() < 0.35
+        ? CURATED_PALETTES[Math.floor(Math.random() * CURATED_PALETTES.length)]
+        : createFastSwatchPalette();
 
     applyPaletteToStats(nextStats, palette);
     nextStats.atk = Math.round(randomFromRange(8, 14));
@@ -1428,12 +1558,20 @@ async function buildRandomBeyStats(baseStats: BeybladeStats): Promise<BeybladeSt
     nextStats.spd = Math.round(randomFromRange(52, 76));
     nextStats.wt = Number(randomFromRange(0.85, 1.35).toFixed(2));
     nextStats.crtAtk = Math.round(nextStats.atk * randomFromRange(2.0, 2.7));
-    nextStats.beyScale = Number(randomFromRange(0.94, 1.08).toFixed(2));
-    nextStats.ringRadiusFactor = Number(randomFromRange(0.68, 0.86).toFixed(2));
-    nextStats.ringSides = [24, 32, 40, 48, 64][Math.floor(Math.random() * 5)];
-    nextStats.boltSides = [5, 6, 8][Math.floor(Math.random() * 3)];
-    nextStats.spinTrackSize = Number(randomFromRange(0.85, 1.18).toFixed(2));
-    nextStats.tipSize = Number(randomFromRange(0.85, 1.15).toFixed(2));
+    nextStats.beyScale = Number(randomFromRange(0.9, 1.14).toFixed(2));
+    nextStats.wheelWidthFactor = Number(randomFromRange(0.88, 1.16).toFixed(2));
+    nextStats.wheelHeightFactor = Number(randomFromRange(0.62, 1.52).toFixed(2));
+    nextStats.ringRadiusFactor = Number(randomFromRange(0.58, 0.96).toFixed(2));
+    nextStats.ringWidthFactor = Number(randomFromRange(0.58, 1.42).toFixed(2));
+    nextStats.ringHeightFactor = Number(randomFromRange(0.58, 1.5).toFixed(2));
+    nextStats.ringSides = [10, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64][Math.floor(Math.random() * 11)];
+    nextStats.boltWidthFactor = Number(randomFromRange(0.68, 1.38).toFixed(2));
+    nextStats.boltHeightFactor = Number(randomFromRange(0.62, 1.58).toFixed(2));
+    nextStats.boltSides = [3, 4, 5, 6, 7, 8, 10, 12][Math.floor(Math.random() * 8)];
+    nextStats.spinTrackSize = Number(randomFromRange(0.66, 1.34).toFixed(2));
+    nextStats.spinTrackHeightFactor = Number(randomFromRange(0.66, 1.54).toFixed(2));
+    nextStats.tipSize = Number(randomFromRange(0.68, 1.34).toFixed(2));
+    nextStats.tipHeightFactor = Number(randomFromRange(0.64, 1.58).toFixed(2));
     enforceBeyColorContrast(nextStats);
 
     return nextStats;
@@ -1456,16 +1594,24 @@ const PLAYER_STATS: BeybladeStats = {
     height: 10,
     // Visuals (Blue Theme from Pool)
     beyScale: 1.0,
+    wheelWidthFactor: 1.0,
+    wheelHeightFactor: 1.0,
     wheelColor: 0x888888,
     ringColor: 0x0088ff, // Blue
     ringSides: 32,
     ringRadiusFactor: 0.75,
+    ringWidthFactor: 1.0,
+    ringHeightFactor: 1.0,
     boltColor: 0x00ccff, // Cyan
     boltSides: 6,
+    boltWidthFactor: 1.0,
+    boltHeightFactor: 1.0,
     spinTrackColor: 0x777777,
     spinTrackSize: 1.0,
+    spinTrackHeightFactor: 1.0,
     tipColor: 0x888888,
     tipSize: 1.0,
+    tipHeightFactor: 1.0,
     trailColor: 0x00ccff,
     // Arena Forces
     dishForce: 2, // DISH_LOW
@@ -1491,16 +1637,24 @@ const ENEMY_STATS: BeybladeStats = {
     height: 10,
     // Visuals (Orange Theme from Pool)
     beyScale: 1.0,
+    wheelWidthFactor: 1.0,
+    wheelHeightFactor: 1.0,
     wheelColor: 0x888888,
     ringColor: 0xff6600, // Orange
     ringSides: 32,
     ringRadiusFactor: 0.75,
+    ringWidthFactor: 1.0,
+    ringHeightFactor: 1.0,
     boltColor: 0xffaa00, // Gold
     boltSides: 6,
+    boltWidthFactor: 1.0,
+    boltHeightFactor: 1.0,
     spinTrackColor: 0x777777,
     spinTrackSize: 1.0,
+    spinTrackHeightFactor: 1.0,
     tipColor: 0x888888,
     tipSize: 1.0,
+    tipHeightFactor: 1.0,
     trailColor: 0xffaa00,
     // Arena Forces
     dishForce: 2, // DISH_LOW
@@ -1564,16 +1718,24 @@ loadPresets();
 
 const VISUAL_FIELDS = [
     { key: 'beyScale', label: 'SCALE', hint: 'Size', type: 'number', step: 0.1 },
+    { key: 'wheelWidthFactor', label: 'BASE WIDTH', hint: 'Wheel span', type: 'number', step: 0.05 },
+    { key: 'wheelHeightFactor', label: 'BASE HEIGHT', hint: 'Wheel stack', type: 'number', step: 0.05 },
     { key: 'wheelColor', label: 'WHEEL', hint: 'Hex', type: 'color' },
     { key: 'ringColor', label: 'RING', hint: 'Hex', type: 'color' },
     { key: 'ringRadiusFactor', label: 'RING RADIUS', hint: 'Size factor', type: 'number', step: 0.05 },
+    { key: 'ringWidthFactor', label: 'RING WIDTH', hint: 'Band width', type: 'number', step: 0.05 },
+    { key: 'ringHeightFactor', label: 'RING HEIGHT', hint: 'Band height', type: 'number', step: 0.05 },
     { key: 'ringSides', label: 'RING SIDES', hint: 'Shape sides', type: 'number', step: 1 },
     { key: 'boltColor', label: 'BOLT', hint: 'Hex', type: 'color' },
     { key: 'boltSides', label: 'BOLT SIDES', hint: 'Hex/Circle', type: 'number', step: 1 },
+    { key: 'boltWidthFactor', label: 'BOLT WIDTH', hint: 'Cap width', type: 'number', step: 0.05 },
+    { key: 'boltHeightFactor', label: 'BOLT HEIGHT', hint: 'Cap height', type: 'number', step: 0.05 },
     { key: 'spinTrackColor', label: 'TRACK', hint: 'Hex', type: 'color' },
     { key: 'spinTrackSize', label: 'ST SIZE', hint: 'Track depth', type: 'number', step: 0.1 },
+    { key: 'spinTrackHeightFactor', label: 'TRACK HEIGHT', hint: 'Stem height', type: 'number', step: 0.05 },
     { key: 'tipColor', label: 'TIP', hint: 'Hex', type: 'color' },
     { key: 'tipSize', label: 'TIP SIZE', hint: 'Radius', type: 'number', step: 0.1 },
+    { key: 'tipHeightFactor', label: 'TIP HEIGHT', hint: 'Driver height', type: 'number', step: 0.05 },
 ];
 
 const COMBAT_FIELDS = [
@@ -1637,7 +1799,7 @@ let gameOver = false;
 let tutorialModeActive = false;
 let tutorialPauseActive = false;
 let tutorialSlowMoActive = false;
-let tutorialPhase: 'idle' | 'aim' | 'launch' | 'waitingDiveMoment' | 'dive' | 'gainSpeed' | 'speedModal' | 'waitingCrit' | 'finishModal' | 'complete' = 'idle';
+let tutorialPhase: 'idle' | 'aim' | 'launch' | 'waitingDiveMoment' | 'dive' | 'gainSpeed' | 'speedModal' | 'waitingCrit' | 'waitingSecondCrit' | 'finishModal' | 'complete' = 'idle';
 let tutorialNextPromptAt = 0;
 let tutorialPromptEl: HTMLElement | null = null;
 let tutorialWarningEl: HTMLElement | null = null;
@@ -1677,18 +1839,18 @@ hudTopBar.id = 'hud-top-bar';
 hudTopBar.innerHTML = `
     <div class="hud-group">
         <button class="rpm-label" id="p1-btn" title="Customize player">P1</button>
-        <div class="rpm-meter-wrap">
+        <div class="rpm-meter-wrap" data-crit-owner="player">
             <meter id="player-meter" min="0" max="1000" low="200" high="800" optimum="1000" value="0" aria-label="P1 RPM"></meter>
             <span id="player-rpm" class="rpm-text">0</span>
         </div>
     </div>
     <div class="hud-divider">VS</div>
     <div class="hud-group">
-        <div class="rpm-meter-wrap">
-            <meter id="enemy-meter" min="0" max="1000" low="200" high="800" optimum="1000" value="0" aria-label="CPU RPM" style="transform: scaleX(-1);"></meter>
+        <div class="rpm-meter-wrap" data-crit-owner="enemy">
+            <meter id="enemy-meter" min="0" max="1000" low="200" high="800" optimum="1000" value="0" aria-label="CPU1 RPM" style="transform: scaleX(-1);"></meter>
             <span id="enemy-rpm" class="rpm-text">0</span>
         </div>
-        <button class="rpm-label" id="cpu-btn" title="Customize CPU">CPU</button>
+        <button class="rpm-label" id="cpu-btn" title="Customize CPU1">CPU1</button>
     </div>
 `;
 uiContainer.appendChild(hudTopBar);
@@ -1754,8 +1916,19 @@ function updateCpuPhysicsFromPattern() {
     enemy.stats.frictionAir = p.drag;
 }
 
-function scheduleNextCpuDiveSwitch(now: number) {
-    cpuNextDiveSwitchAt = now + randomFromRange(0.85, 2.2);
+function isHardCpuMode() {
+    return multiplayer.role === 'solo' && localPlayMode === '1p-hard';
+}
+
+function scheduleNextCpuDiveSwitch(now: number, delay?: number) {
+    if (typeof delay === 'number') {
+        cpuNextDiveSwitchAt = now + delay;
+        return;
+    }
+
+    cpuNextDiveSwitchAt = now + (isHardCpuMode()
+        ? randomFromRange(0.12, 0.32)
+        : randomFromRange(0.85, 2.2));
 }
 
 function setCpuPattern(pattern: number) {
@@ -1776,10 +1949,74 @@ function updateCpuDive(now: number) {
     if (!hasLaunched || gameOver) return;
     if (now < cpuNextDiveSwitchAt) return;
 
+    if (isHardCpuMode()) {
+        const decision = getHardCpuDiveDecision(now);
+        if (decision.reason !== cpuHardAiLastReason || decision.pattern !== cpuPatternIndex) {
+            cpuHardAiLastReason = decision.reason;
+        }
+        setCpuPattern(decision.pattern);
+        scheduleNextCpuDiveSwitch(now, decision.nextDelay);
+        return;
+    }
+
     const playerIsDiving = currentPatternIndex === 1;
     const diveChance = playerIsDiving ? 0.62 : 0.38;
     setCpuPattern(Math.random() < diveChance ? 1 : 0);
     scheduleNextCpuDiveSwitch(now);
+}
+
+function getClosingSpeed(attacker: GameEntity, target: GameEntity) {
+    const toTargetX = target.body.position.x - attacker.body.position.x;
+    const toTargetY = target.body.position.y - attacker.body.position.y;
+    const distance = Math.max(1, Math.hypot(toTargetX, toTargetY));
+    const dirX = toTargetX / distance;
+    const dirY = toTargetY / distance;
+    const relativeVelocityX = attacker.body.velocity.x - target.body.velocity.x;
+    const relativeVelocityY = attacker.body.velocity.y - target.body.velocity.y;
+    return relativeVelocityX * dirX + relativeVelocityY * dirY;
+}
+
+function getHardCpuDiveDecision(now: number): { pattern: number; reason: string; nextDelay: number } {
+    const playerDistance = Math.hypot(player.body.position.x, player.body.position.y);
+    const enemyDistance = Math.hypot(enemy.body.position.x, enemy.body.position.y);
+    const playerSpeed = player.body.speed;
+    const enemySpeed = enemy.body.speed;
+    const distanceBetweenBeys = Math.hypot(
+        player.body.position.x - enemy.body.position.x,
+        player.body.position.y - enemy.body.position.y
+    );
+    const playerClosingSpeed = getClosingSpeed(player, enemy);
+
+    const wallDanger = enemyDistance > ARENA_RADIUS * 0.82 || now - cpuLastWallHitAt < 1.1;
+    if (wallDanger) {
+        return { pattern: 1, reason: 'wall_escape', nextDelay: 0.14 };
+    }
+
+    const criticalIncoming = playerSpeed > CRIT_SPEED_THRESHOLD * 0.88
+        && playerSpeed > enemySpeed + 2
+        && distanceBetweenBeys < ARENA_RADIUS * 0.95
+        && playerClosingSpeed > 2.2;
+    if (criticalIncoming) {
+        return { pattern: 1, reason: 'dodge_critical', nextDelay: 0.12 };
+    }
+
+    const cpuWide = enemyDistance > ARENA_RADIUS * 0.58;
+    const playerCentered = playerDistance < ARENA_RADIUS * 0.34;
+    if (cpuWide && playerCentered) {
+        return { pattern: 1, reason: 'center_attack', nextDelay: 0.18 };
+    }
+
+    const cpuRecoveredCenter = enemyDistance < ARENA_RADIUS * 0.25 && cpuPatternIndex === 1;
+    if (cpuRecoveredCenter) {
+        return { pattern: 0, reason: 'recover_orbit', nextDelay: 0.28 };
+    }
+
+    const pressureChance = playerSpeed < CRIT_SPEED_THRESHOLD * 0.62 && enemyDistance > playerDistance + 48 ? 0.32 : 0.12;
+    return {
+        pattern: Math.random() < pressureChance ? 1 : 0,
+        reason: 'idle_pressure',
+        nextDelay: randomFromRange(0.42, 0.72)
+    };
 }
 
 function applyPlayerDivePattern(pattern: number) {
@@ -2061,7 +2298,7 @@ function updateBeyNoiseLayer(layer: TBeyNoiseLayer | null, entity: GameEntity, p
     const speed = hasLaunched && !entity.isDead ? entity.body.speed : 0;
     const speedRatio = THREE.MathUtils.clamp(speed / 18, 0, 1);
     const now = audioCtx.currentTime;
-    const targetGain = 0.02 + speedRatio * 0.03;
+    const targetGain = (0.02 + speedRatio * 0.03) * 1.5;
     const targetFrequency = 520 + speedRatio * 720;
     const targetPlaybackRate = 0.62 + speedRatio * 0.18;
 
@@ -2312,27 +2549,38 @@ Events.on(engine, 'collisionStart', (event) => {
             // A hits B
             const speedA = entityA.body.speed;
             const isCritA = speedA > CRIT_SPEED_THRESHOLD;
+            const speedB = entityB.body.speed;
+            const isCritB = speedB > CRIT_SPEED_THRESHOLD;
+
             const rawDmgA = isCritA ? entityA.stats.crtAtk : entityA.stats.atk;
-            const finalDmgA = Math.max(0, rawDmgA - entityB.stats.def);
+            const baseFinalDmgA = Math.max(0, rawDmgA - entityB.stats.def);
+            const critStreakA = updateCriticalStreakForHit(entityA, isCritA);
+            const finalDmgA = isCritA ? applyCriticalStreakDamage(baseFinalDmgA, entityA, critStreakA) : baseFinalDmgA;
             let rpmLostByB = 0;
 
             if (entityB.currentRpm !== undefined) {
                 const rpmBefore = entityB.currentRpm;
                 entityB.currentRpm = Math.max(0, entityB.currentRpm - finalDmgA);
                 rpmLostByB = rpmBefore - entityB.currentRpm;
+                if (isCritA && rpmBefore > 0 && entityB.currentRpm <= 0 && finalDmgA > 0) {
+                    entityB.criticalKo = true;
+                }
             }
 
             // B hits A
-            const speedB = entityB.body.speed;
-            const isCritB = speedB > CRIT_SPEED_THRESHOLD;
             const rawDmgB = isCritB ? entityB.stats.crtAtk : entityB.stats.atk;
-            const finalDmgB = Math.max(0, rawDmgB - entityA.stats.def);
+            const baseFinalDmgB = Math.max(0, rawDmgB - entityA.stats.def);
+            const critStreakB = updateCriticalStreakForHit(entityB, isCritB);
+            const finalDmgB = isCritB ? applyCriticalStreakDamage(baseFinalDmgB, entityB, critStreakB) : baseFinalDmgB;
             let rpmLostByA = 0;
 
             if (entityA.currentRpm !== undefined) {
                 const rpmBefore = entityA.currentRpm;
                 entityA.currentRpm = Math.max(0, entityA.currentRpm - finalDmgB);
                 rpmLostByA = rpmBefore - entityA.currentRpm;
+                if (isCritB && rpmBefore > 0 && entityA.currentRpm <= 0 && finalDmgB > 0) {
+                    entityA.criticalKo = true;
+                }
             }
 
 
@@ -2366,13 +2614,15 @@ Events.on(engine, 'collisionStart', (event) => {
                     crit: entityA.stats.crtAtk,
                     def: entityB.stats.def,
                     dmg: finalDmgA,
-                    rpmLost: rpmLostByB
+                    rpmLost: rpmLostByB,
+                    streak: critStreakA
                 });
                 if (isCritB) notifyTutorialCriticalHit(entityB, {
                     crit: entityB.stats.crtAtk,
                     def: entityA.stats.def,
                     dmg: finalDmgB,
-                    rpmLost: rpmLostByA
+                    rpmLost: rpmLostByA,
+                    streak: critStreakB
                 });
                 playCollisionSound(0.34, 675, true);
             } else {
@@ -2382,6 +2632,7 @@ Events.on(engine, 'collisionStart', (event) => {
             // Fallback / Wall hits
             // If one is a Beyblade and the other is not (Environment), apply Barrier Damage
             if (entityA && !entityB) {
+                resetCriticalStreak(getCriticalOwner(entityA));
                 // A hit a wall
                 let rpmLost = 0;
                 if (entityA.currentRpm !== undefined) {
@@ -2390,8 +2641,13 @@ Events.on(engine, 'collisionStart', (event) => {
                     rpmLost = rpmBefore - entityA.currentRpm;
                 }
                 getMatchCounterSide(entityA)!.wallDings += 1;
+                if (entityA === enemy && isHardCpuMode()) {
+                    cpuLastWallHitAt = clock.getElapsedTime();
+                    cpuNextDiveSwitchAt = Math.min(cpuNextDiveSwitchAt, cpuLastWallHitAt);
+                }
                 notifyTutorialWallHit(entityA, { dmg: BARRIER_DAMAGE, rpmLost });
             } else if (entityB && !entityA) {
+                resetCriticalStreak(getCriticalOwner(entityB));
                 // B hit a wall
                 let rpmLost = 0;
                 if (entityB.currentRpm !== undefined) {
@@ -2400,6 +2656,10 @@ Events.on(engine, 'collisionStart', (event) => {
                     rpmLost = rpmBefore - entityB.currentRpm;
                 }
                 getMatchCounterSide(entityB)!.wallDings += 1;
+                if (entityB === enemy && isHardCpuMode()) {
+                    cpuLastWallHitAt = clock.getElapsedTime();
+                    cpuNextDiveSwitchAt = Math.min(cpuNextDiveSwitchAt, cpuLastWallHitAt);
+                }
                 notifyTutorialWallHit(entityB, { dmg: BARRIER_DAMAGE, rpmLost });
             }
 
@@ -2436,6 +2696,67 @@ function getPhysicsSubsteps(speedMultiplier: number) {
     return REDUCED_PHYSICS_WORK ? 3 : 4;
 }
 
+function scatterBeyParts(entity: GameEntity) {
+    if (entity.looseParts?.length) return;
+
+    entity.mesh.updateMatrixWorld(true);
+    const partObjects = [...entity.spinGroup.children];
+    const origin = entity.mesh.position.clone();
+    const baseVelocity = entity.driftVelocity?.clone() || new THREE.Vector3();
+    const looseParts: TLooseBeyPart[] = [];
+    const vortex = entity.mesh.userData.vortex as THREE.Object3D | undefined;
+    if (vortex) vortex.visible = false;
+
+    partObjects.forEach((part, index) => {
+        part.updateMatrixWorld(true);
+        scene.attach(part);
+
+        const fromCenter = part.position.clone().sub(origin);
+        if (fromCenter.lengthSq() < 0.01) {
+            const angle = (index / Math.max(1, partObjects.length)) * Math.PI * 2;
+            fromCenter.set(Math.cos(angle), 0.28, Math.sin(angle));
+        }
+        fromCenter.normalize();
+
+        const tangent = new THREE.Vector3(-fromCenter.z, 0.18 + Math.random() * 0.22, fromCenter.x).normalize();
+        const spread = 2.4 + Math.random() * 2.6 + index * 0.28;
+        const velocity = baseVelocity.clone().multiplyScalar(0.16)
+            .addScaledVector(fromCenter, spread)
+            .addScaledVector(tangent, 1.1 + Math.random() * 1.4);
+        velocity.y = Math.max(0.85, velocity.y + 0.6 + Math.random() * 1.6);
+
+        looseParts.push({
+            object: part,
+            velocity,
+            rotationVelocity: new THREE.Vector3(
+                randomFromRange(-0.18, 0.18),
+                randomFromRange(-0.24, 0.24),
+                randomFromRange(-0.18, 0.18)
+            )
+        });
+    });
+
+    entity.looseParts = looseParts;
+}
+
+function updateLooseBeyParts(entity: GameEntity, scale: number) {
+    entity.looseParts?.forEach((part) => {
+        part.object.position.addScaledVector(part.velocity, scale);
+        part.object.rotation.x += part.rotationVelocity.x * scale;
+        part.object.rotation.y += part.rotationVelocity.y * scale;
+        part.object.rotation.z += part.rotationVelocity.z * scale;
+        part.velocity.y -= 0.035 * scale;
+    });
+}
+
+function clearLooseBeyParts(entity: GameEntity) {
+    entity.looseParts?.forEach((part) => {
+        part.object.parent?.remove(part.object);
+    });
+    entity.looseParts = undefined;
+    entity.criticalKo = false;
+}
+
 let frameCounter = 0;
 
 
@@ -2444,7 +2765,10 @@ function animate() {
 
     // Physics Update
     const simulationPaused = tutorialPauseActive;
-    const speedMultiplier = GAME_SPEEDS[currentGameSpeed].multiplier * (tutorialSlowMoActive ? 0.28 : 1);
+    const finishSlowMoActive = clock.getElapsedTime() < finishSlowMoUntil;
+    const speedMultiplier = GAME_SPEEDS[currentGameSpeed].multiplier
+        * (tutorialSlowMoActive ? 0.28 : 1)
+        * (finishSlowMoActive ? 0.18 : 1);
     const physicsSubsteps = simulationPaused ? 0 : getPhysicsSubsteps(speedMultiplier);
     const subStepDelta = physicsSubsteps > 0 ? ((1000 / 60) * speedMultiplier) / physicsSubsteps : 0;
     if (!simulationPaused) updateCpuDive(clock.getElapsedTime());
@@ -2563,14 +2887,18 @@ function animate() {
                 }
                 // Minimum lift to clear the floor
                 driftV.y = Math.max(driftV.y, 0.5);
+                driftV.clampLength(0.3, 8);
 
                 entity.driftVelocity = driftV;
 
                 entity.driftRotation = new THREE.Vector3(
-                    Math.random() * 0.2 - 0.1,
-                    Math.random() * 0.2 - 0.1,
-                    Math.random() * 0.2 - 0.1
+                    randomFromRange(-0.012, 0.012),
+                    randomFromRange(-0.018, 0.018),
+                    randomFromRange(-0.012, 0.012)
                 );
+                if (entity.criticalKo && entity.currentRpm <= 0) {
+                    scatterBeyParts(entity);
+                }
 
                 // Remove from Physics World
                 Composite.remove(engine.world, entity.body);
@@ -2579,9 +2907,9 @@ function animate() {
                 if (!gameOver) {
                     gameOver = true;
                     if (entity === player) {
-                        showWinner(`${getOpponentLabel()} WINS`, enemy.stats?.trailColor || ENEMY_STATS.trailColor);
+                        triggerWinningShot(entity, `${getOpponentLabel()} WINS`, enemy.stats?.trailColor || ENEMY_STATS.trailColor);
                     } else if (entity === enemy) {
-                        showWinner('P1 WINS', player.stats?.trailColor || PLAYER_STATS.trailColor);
+                        triggerWinningShot(entity, 'P1 WINS', player.stats?.trailColor || PLAYER_STATS.trailColor);
                     }
                 }
             }
@@ -2591,10 +2919,17 @@ function animate() {
         if (entity.isDead) {
             // Asteroid Mode
             if (entity.driftVelocity && entity.driftRotation) {
-                entity.mesh.position.add(entity.driftVelocity);
-                entity.mesh.rotation.x += entity.driftRotation.x;
-                entity.mesh.rotation.y += entity.driftRotation.y;
-                entity.mesh.rotation.z += entity.driftRotation.z;
+                const koFinishActive = clock.getElapsedTime() < finishSlowMoUntil;
+                const driftScale = koFinishActive ? KO_FINISH_DRIFT_SCALE : 1;
+                const rotationScale = koFinishActive ? KO_FINISH_ROTATION_SCALE : 1;
+                if (entity.looseParts?.length) {
+                    updateLooseBeyParts(entity, driftScale);
+                } else {
+                    entity.mesh.position.addScaledVector(entity.driftVelocity, driftScale);
+                    entity.mesh.rotation.x += entity.driftRotation.x * rotationScale;
+                    entity.mesh.rotation.y += entity.driftRotation.y * rotationScale;
+                    entity.mesh.rotation.z += entity.driftRotation.z * rotationScale;
+                }
 
                 // Slight fade? Or just fly away.
             }
@@ -2621,6 +2956,9 @@ function animate() {
         // Additional Tilt logic (Wobble based on velocity)
         const vel = entity.body.velocity;
         const speed = Math.sqrt(vel.x * vel.x + vel.y * vel.y);
+        const isCriticalMode = speed > CRIT_SPEED_THRESHOLD;
+        const streakOpacityStep = Math.min(getCriticalStreak(entity), 5) * 0.1;
+        const vortexOpacity = Math.max(isCriticalMode ? 0.1 : 0.035, streakOpacityStep);
         updateBeyVortex(
             entity.mesh,
             clock.getElapsedTime(),
@@ -2628,7 +2966,8 @@ function animate() {
             entity.currentRpm || 0,
             entity.stats?.maxRpm || 1000,
             entity === player ? 1 : -1,
-            entity.stats?.trailColor
+            entity.stats?.trailColor,
+            vortexOpacity
         );
         const maxTilt = 0.5;
         const tiltAmount = Math.min((speed / 20) * maxTilt, maxTilt);
@@ -2880,6 +3219,7 @@ function stableStringify(value: unknown): string {
 
 function openStatEditor(targetStats: BeybladeStats, targetName: string) {
     try {
+        const isPlayerTarget = targetStats === PLAYER_STATS;
         const customizationTarget = getCustomizationTargetId(targetName);
         trackGameEvent('bey_customization_opened', {
             target: customizationTarget,
@@ -2961,17 +3301,25 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
             key: keyof BeybladeStats;
             label: string;
             max: number;
+            step: number;
             format: (value: number) => string;
         };
 
         const STAT_METER_CONFIGS: TStatMeterConfig[] = [
-            { key: 'atk', label: 'ATK', max: 14, format: (value) => Math.round(value).toString() },
-            { key: 'def', label: 'DEF', max: 11, format: (value) => Math.round(value).toString() },
-            { key: 'sta', label: 'STA', max: 2, format: (value) => value.toFixed(1) },
-            { key: 'spd', label: 'SPD', max: 80, format: (value) => Math.round(value).toString() },
-            { key: 'wt', label: 'WGT', max: 1.6, format: (value) => value.toFixed(2) },
-            { key: 'crtAtk', label: 'CRT', max: 35, format: (value) => Math.round(value).toString() }
+            { key: 'atk', label: 'ATK', max: 14, step: 1, format: (value) => Math.round(value).toString() },
+            { key: 'def', label: 'DEF', max: 11, step: 1, format: (value) => Math.round(value).toString() },
+            { key: 'sta', label: 'STA', max: 2, step: 0.1, format: (value) => value.toFixed(1) },
+            { key: 'spd', label: 'SPD', max: 80, step: 1, format: (value) => Math.round(value).toString() },
+            { key: 'wt', label: 'WGT', max: 1.6, step: 0.01, format: (value) => value.toFixed(2) },
+            { key: 'crtAtk', label: 'CRT', max: 35, step: 1, format: (value) => Math.round(value).toString() }
         ];
+
+        let customizationDirty = false;
+        let closeHandled = false;
+
+        function markCustomizationDirty() {
+            customizationDirty = true;
+        }
 
         STAT_METER_CONFIGS.forEach((field) => {
             const row = document.createElement('div');
@@ -2979,11 +3327,19 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
             row.dataset.statKey = field.key;
             row.innerHTML = `
                 <span class="stat-meter-label">${field.label}</span>
-                <span class="stat-meter-track" role="meter" aria-label="${field.label}" aria-valuemin="0" aria-valuemax="${field.max}" aria-valuenow="0">
+                <span class="stat-meter-track">
                     <span class="stat-meter-fill"></span>
+                    <input class="stat-meter-range" type="range" min="0" max="${field.max}" step="${field.step}" value="0" aria-label="${field.label}">
                 </span>
                 <span class="stat-meter-value">0</span>
             `;
+            const range = row.querySelector<HTMLInputElement>('.stat-meter-range');
+            range?.addEventListener('input', (event) => {
+                const value = Number((event.target as HTMLInputElement).value);
+                (tempStats as any)[field.key] = value;
+                markCustomizationDirty();
+                refreshStatMeters();
+            });
             statMeterPanel.appendChild(row);
         });
 
@@ -2995,9 +3351,14 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
                 const meter = row.querySelector<HTMLElement>('.stat-meter-track');
                 const fill = row.querySelector<HTMLElement>('.stat-meter-fill');
                 const valueEl = row.querySelector<HTMLElement>('.stat-meter-value');
+                const range = row.querySelector<HTMLInputElement>('.stat-meter-range');
                 const clampedValue = Math.min(rawValue, field.max);
-                if (meter) meter.setAttribute('aria-valuenow', String(clampedValue));
-                if (fill) fill.style.width = `${(clampedValue / field.max) * 100}%`;
+                if (meter) meter.style.setProperty('--meter-fill', `${(clampedValue / field.max) * 100}%`);
+                if (fill) {
+                    fill.style.width = `${(clampedValue / field.max) * 100}%`;
+                    fill.style.height = '100%';
+                }
+                if (range && range.value !== String(clampedValue)) range.value = String(clampedValue);
                 if (valueEl) valueEl.textContent = field.format(rawValue);
             });
         }
@@ -3015,17 +3376,46 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
 
         refreshStatMeters();
 
+        function commitCustomization() {
+            const previousStatsKey = stableStringify(targetStats);
+            syncTrailWithBolt(tempStats);
+            sanitizePartMatcaps(tempStats);
+            enforceBeyColorContrast(tempStats);
+            const changed = customizationDirty || previousStatsKey !== stableStringify(tempStats);
+
+            trackGameEvent('bey_customization_applied', {
+                target: customizationTarget,
+                mode: multiplayer.role !== 'solo' ? 'online' : localPlayMode,
+                changed
+            });
+
+            if (!changed) return false;
+
+            trackGameEvent('bey_customized_new', { target: customizationTarget });
+            if (customizationTarget === 'player') trackGameEvent('player_bey_customized_new');
+
+            Object.assign(targetStats, tempStats);
+
+            if (isPlayerTarget) matchStartPlayerStats = JSON.parse(JSON.stringify(targetStats));
+            else matchStartEnemyStats = JSON.parse(JSON.stringify(targetStats));
+
+            savePresets();
+            if (isPlayerTarget) sendLocalBeyEdit();
+            return true;
+        }
+
         randomizeBtn.onclick = async () => {
             trackGameEvent('bey_customization_randomized', { target: customizationTarget });
-            randomizeBtn.title = 'Fetching palette';
+            randomizeBtn.title = 'Random build';
             randomizeBtn.disabled = true;
             const preset = BEY_PRESETS[Math.floor(Math.random() * BEY_PRESETS.length)];
             const seededStats = {
                 ...JSON.parse(JSON.stringify(targetStats)),
                 ...JSON.parse(JSON.stringify(preset.stats))
             } as BeybladeStats;
-            tempStats = await buildRandomBeyStats(seededStats);
+            tempStats = buildRandomBeyStats(seededStats);
             syncTrailWithBolt(tempStats);
+            markCustomizationDirty();
             refreshEditorValues();
             updatePreview(tempStats);
             renderMatcapGrid();
@@ -3093,11 +3483,11 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
         detachedVisualControls.appendChild(matcapSection);
 
         const parts: Array<{ id: TMatcapPart, label: string, colorKey: keyof BeybladeStats, shapeKeys: Array<keyof BeybladeStats> }> = [
-            { id: 'wheel', label: 'Base', colorKey: 'wheelColor', shapeKeys: ['beyScale'] },
-            { id: 'ring', label: 'Ring', colorKey: 'ringColor', shapeKeys: ['ringRadiusFactor', 'ringSides'] },
-            { id: 'bolt', label: 'Bolt', colorKey: 'boltColor', shapeKeys: ['boltSides'] },
-            { id: 'spinTrack', label: 'Track', colorKey: 'spinTrackColor', shapeKeys: ['spinTrackSize'] },
-            { id: 'tip', label: 'Tip', colorKey: 'tipColor', shapeKeys: ['tipSize'] }
+            { id: 'wheel', label: 'Base', colorKey: 'wheelColor', shapeKeys: ['beyScale', 'wheelWidthFactor', 'wheelHeightFactor'] },
+            { id: 'ring', label: 'Ring', colorKey: 'ringColor', shapeKeys: ['ringRadiusFactor', 'ringWidthFactor', 'ringHeightFactor', 'ringSides'] },
+            { id: 'bolt', label: 'Bolt', colorKey: 'boltColor', shapeKeys: ['boltWidthFactor', 'boltHeightFactor', 'boltSides'] },
+            { id: 'spinTrack', label: 'Track', colorKey: 'spinTrackColor', shapeKeys: ['spinTrackSize', 'spinTrackHeightFactor'] },
+            { id: 'tip', label: 'Tip', colorKey: 'tipColor', shapeKeys: ['tipSize', 'tipHeightFactor'] }
         ];
         const visualFieldByKey = new Map(VISUAL_FIELDS.map(field => [field.key, field]));
 
@@ -3114,7 +3504,7 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
             const colorControl = createInput(
                 `v-${part.colorKey}`,
                 `${part.label} color`,
-                (targetStats as any)[part.colorKey],
+                (tempStats as any)[part.colorKey],
                 'Color',
                 'color',
                 1,
@@ -3122,6 +3512,7 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
                     (tempStats as any)[part.colorKey] = clampBeyColor(val);
                     if (part.colorKey === 'boltColor') syncTrailWithBolt(tempStats);
                     enforceBeyColorContrast(tempStats);
+                    markCustomizationDirty();
                     refreshEditorValues();
                     updatePreview(tempStats);
                 }
@@ -3138,12 +3529,13 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
                 const shapeControl = createInput(
                     `v-${field.key}`,
                     field.label,
-                    (targetStats as any)[field.key],
+                    (tempStats as any)[field.key],
                     field.hint,
                     field.type,
                     field.step || 1,
                     (val) => {
                         (tempStats as any)[field.key] = val;
+                        markCustomizationDirty();
                         updatePreview(tempStats);
                     }
                 );
@@ -3178,6 +3570,7 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
                 clearBtn.onclick = () => {
                     if (!tempStats.partMatcaps) tempStats.partMatcaps = {};
                     delete tempStats.partMatcaps[part.id];
+                    markCustomizationDirty();
                     updatePreview(tempStats);
                     renderMatcapGrid();
                 };
@@ -3195,6 +3588,7 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
                     btn.onclick = () => {
                         if (!tempStats.partMatcaps) tempStats.partMatcaps = {};
                         tempStats.partMatcaps[part.id] = fullUrl;
+                        markCustomizationDirty();
                         updatePreview(tempStats);
                         renderMatcapGrid();
                     };
@@ -3266,15 +3660,16 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
         resetBtn.onclick = () => {
             if (confirm(`Reset ${targetName} to defaults? This cannot be undone.`)) {
                 trackGameEvent('bey_customization_reset', { target: customizationTarget });
-                if (targetName === 'Player') Object.assign(targetStats, DEFAULT_PLAYER_STATS);
-                if (targetName === 'CPU') Object.assign(targetStats, DEFAULT_ENEMY_STATS);
+                closeHandled = true;
+                if (isPlayerTarget) Object.assign(targetStats, DEFAULT_PLAYER_STATS);
+                else Object.assign(targetStats, DEFAULT_ENEMY_STATS);
 
                 // Update snapshot so resetMatch uses new defaults
-                if (targetName === 'Player') matchStartPlayerStats = JSON.parse(JSON.stringify(DEFAULT_PLAYER_STATS));
-                if (targetName === 'CPU') matchStartEnemyStats = JSON.parse(JSON.stringify(DEFAULT_ENEMY_STATS));
+                if (isPlayerTarget) matchStartPlayerStats = JSON.parse(JSON.stringify(DEFAULT_PLAYER_STATS));
+                else matchStartEnemyStats = JSON.parse(JSON.stringify(DEFAULT_ENEMY_STATS));
 
                 savePresets();
-                if (targetName === 'Player') sendLocalBeyEdit();
+                if (isPlayerTarget) sendLocalBeyEdit();
                 dialog.close();
                 resetMatch();
                 syncHudButtonColors();
@@ -3293,32 +3688,13 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
         `;
 
         saveBtn.onclick = () => {
-            const previousStatsKey = stableStringify(targetStats);
-            syncTrailWithBolt(tempStats);
-            const changed = previousStatsKey !== stableStringify(tempStats);
-
-            trackGameEvent('bey_customization_applied', {
-                target: customizationTarget,
-                mode: multiplayer.role !== 'solo' ? 'online' : localPlayMode,
-                changed
-            });
-            if (changed) {
-                trackGameEvent('bey_customized_new', { target: customizationTarget });
-                if (customizationTarget === 'player') trackGameEvent('player_bey_customized_new');
-            }
-
-            // Apply temp stats to target
-            Object.assign(targetStats, tempStats);
-
-            // Update snapshot so resetMatch uses new stats
-            if (targetName === 'Player') matchStartPlayerStats = JSON.parse(JSON.stringify(targetStats));
-            if (targetName === 'CPU') matchStartEnemyStats = JSON.parse(JSON.stringify(targetStats));
-
-            savePresets();
-            if (targetName === 'Player') sendLocalBeyEdit();
+            const changed = commitCustomization();
+            closeHandled = true;
             dialog.close();
-            resetMatch();
-            syncHudButtonColors();
+            if (changed) {
+                resetMatch();
+                syncHudButtonColors();
+            }
         };
 
         actions.appendChild(randomizeBtn);
@@ -3328,6 +3704,15 @@ function openStatEditor(targetStats: BeybladeStats, targetName: string) {
 
         // Handle Dialog Close Event for Cleanup
         dialog.addEventListener('close', () => {
+            if (!closeHandled) {
+                trackGameEvent('bey_customization_closed', {
+                    target: customizationTarget,
+                    mode: multiplayer.role !== 'solo' ? 'online' : localPlayMode,
+                    changed: customizationDirty,
+                    applied: false
+                });
+                closeHandled = true;
+            }
             if (visualDialog?.open) visualDialog.close();
             if (previewResizeObserver) {
                 previewResizeObserver.disconnect();
@@ -3371,7 +3756,7 @@ if (cpuBtn) {
     cpuBtn.onclick = () => {
         if (multiplayer.role !== 'solo') return;
         clearTutorialInstruction();
-        openStatEditor(ENEMY_STATS, 'CPU');
+        openStatEditor(ENEMY_STATS, getOpponentLabel());
     };
 }
 
@@ -3669,14 +4054,42 @@ function handleTutorialDivePressed() {
 }
 
 function notifyTutorialCriticalHit(entity: GameEntity, report?: TCriticalHitReport) {
-    if (!tutorialModeActive || entity !== player || tutorialPhase !== 'waitingCrit') return;
-    tutorialPhase = 'finishModal';
+    if (!tutorialModeActive || entity !== player) return;
+    if (tutorialPhase !== 'waitingCrit' && tutorialPhase !== 'waitingSecondCrit') return;
+
+    const streak = report?.streak || 1;
+    if (tutorialPhase === 'waitingSecondCrit' && streak < 2) return;
+
     const damageCopy = report
-        ? `CRIT ${Math.round(report.crit)} - DEF ${Math.round(report.def)} = ${Math.round(report.dmg)} DMG. CPU lost ${Math.round(report.rpmLost)} RPM.`
+        ? `Streak x${streak}: ${Math.round(report.crit)} - DEF ${Math.round(report.def)} = ${Math.round(report.dmg)} DMG. CPU lost ${Math.round(report.rpmLost)} RPM.`
         : 'That flash means your fast hit connected. Critical hits deal bonus damage.';
+
+    if (tutorialPhase === 'waitingCrit') {
+        tutorialPhase = 'finishModal';
+        showTutorialCheckpoint(
+            'First critical strike',
+            `This is the first crit strike, so the streak is 1. ${damageCopy}`,
+            'Chain another',
+            () => {
+                tutorialPhase = 'waitingSecondCrit';
+                showTutorialInstruction(
+                    'Land a second critical',
+                    'Keep your speed high and hit again before a normal hit breaks the chain. The next critical shows the streak damage jump.',
+                    cycleBtn,
+                    cycleBtnContainer,
+                    false
+                );
+            },
+            cycleBtn,
+            'end'
+        );
+        return;
+    }
+
+    tutorialPhase = 'finishModal';
     showTutorialCheckpoint(
-        'Critical hit landed',
-        `That flash means your fast hit connected. ${damageCopy}`,
+        'Second critical chained',
+        `This second critical keeps the streak alive, so the calculation grows again. ${damageCopy}`,
         'Continue',
         () => {
             tutorialPhase = 'finishModal';
@@ -3742,7 +4155,7 @@ function updateTutorialFlow(now: number) {
                 tutorialPhase = 'waitingCrit';
                 showTutorialInstruction(
                     'Land the hit',
-                    'Keep controlling "DIVE" and collide while fast. Critical hits flash and hit harder.',
+                    'Keep controlling "DIVE" and collide while fast. Your first critical starts a streak at 1.',
                     cycleBtn,
                     cycleBtnContainer,
                     false
@@ -3834,7 +4247,8 @@ function getMultiplayerStatusText() {
 }
 
 function getOpponentLabel() {
-    return localPlayMode === '2p' || multiplayer.role !== 'solo' ? 'P2' : 'CPU';
+    if (localPlayMode === '2p' || multiplayer.role !== 'solo') return 'P2';
+    return localPlayMode === '1p-hard' ? 'CPU2' : 'CPU1';
 }
 
 function createJoinLink(peerId: string) {
@@ -4061,6 +4475,8 @@ function startLocalSimulatedMatch(localLaunchAngle: number, localOpponentAngle?:
     }
 
     setCpuPattern(0);
+    cpuLastWallHitAt = -Infinity;
+    cpuHardAiLastReason = 'idle';
     scheduleNextCpuDiveSwitch(clock.getElapsedTime() + 0.5);
     launchEntity(player, localLaunchAngle);
     if (multiplayer.role !== 'solo') {
@@ -4326,12 +4742,12 @@ function showOnlineDialog() {
     document.body.appendChild(overlay);
 
     overlay.querySelector('#online-host-match')?.addEventListener('click', () => {
-        localPlayMode = '1p';
+        localPlayMode = '1p-easy';
         startMultiplayerHost();
     });
     overlay.querySelector('#online-join-match')?.addEventListener('click', () => {
         const rawValue = overlay.querySelector<HTMLInputElement>('#online-peer-id')?.value.trim() || '';
-        localPlayMode = '1p';
+        localPlayMode = '1p-easy';
         joinMultiplayerHost(getPeerIdFromInput(rawValue));
     });
     overlay.querySelector<HTMLInputElement>('#online-host-link')?.addEventListener('click', async (event) => {
@@ -4390,7 +4806,8 @@ function showMenuDialog() {
                 </div>
             </div>
             <div class="tutorial-actions mode-actions menu-play-modes">
-                <button class="action-btn save" id="menu-1p">1P</button>
+                <button class="action-btn save" id="menu-1p-easy">CPU1</button>
+                <button class="action-btn save" id="menu-1p-hard">CPU2</button>
                 <button class="action-btn save" id="menu-2p">2P</button>
                 <button class="action-btn save" id="menu-online">Online</button>
             </div>
@@ -4430,9 +4847,13 @@ function showMenuDialog() {
         clearTutorialWarning();
         overlay.remove();
     };
-    overlay.querySelector('#menu-1p')?.addEventListener('click', () => {
+    overlay.querySelector('#menu-1p-easy')?.addEventListener('click', () => {
         closeForMode();
-        setLocalPlayMode('1p');
+        setLocalPlayMode('1p-easy');
+    });
+    overlay.querySelector('#menu-1p-hard')?.addEventListener('click', () => {
+        closeForMode();
+        setLocalPlayMode('1p-hard');
     });
     overlay.querySelector('#menu-2p')?.addEventListener('click', () => {
         closeForMode();
@@ -4546,13 +4967,13 @@ function showWinner(text: string, accentColor = 0xf7cf2e) {
     stats.innerHTML = `
         <div class="winner-stats-row">
             <span>P1</span>
-            <span><strong>${matchCounters.player.criticalHits}</strong> CRT</span>
-            <span><strong>${matchCounters.player.wallDings}</strong> DNG</span>
+            <span><strong>${matchCounters.player.criticalHits}</strong> Criticals</span>
+            <span><strong>${matchCounters.player.wallDings}</strong> Crashes</span>
         </div>
         <div class="winner-stats-row">
             <span>${opponentLabel}</span>
-            <span><strong>${matchCounters.enemy.criticalHits}</strong> CRT</span>
-            <span><strong>${matchCounters.enemy.wallDings}</strong> DNG</span>
+            <span><strong>${matchCounters.enemy.criticalHits}</strong> Criticals</span>
+            <span><strong>${matchCounters.enemy.wallDings}</strong> Crashes</span>
         </div>
     `;
     overlay.appendChild(stats);
@@ -4569,7 +4990,50 @@ function showWinner(text: string, accentColor = 0xf7cf2e) {
     document.body.appendChild(overlay);
 }
 
+function showWinnerSpotlightFrame(accentColor: number) {
+    activeKoBlankOverlay?.remove();
+    const overlay = document.createElement('div');
+    overlay.className = 'winner-spotlight-frame';
+    overlay.style.setProperty('--ko-accent', `#${numberToHex(accentColor)}`);
+    document.body.appendChild(overlay);
+    activeKoBlankOverlay = overlay;
+}
+
+function triggerWinningShot(loser: GameEntity, winnerText: string, accentColor: number) {
+    const impactPoint = loser.mesh.position.clone();
+    finishSlowMoUntil = clock.getElapsedTime() + KO_FINISH_DURATION_SECONDS;
+
+    triggerCriticalFeedback(impactPoint);
+    cameraShakeState.duration = Math.max(cameraShakeState.duration, 0.48);
+    cameraShakeState.amplitude = Math.max(cameraShakeState.amplitude, 15);
+    playCollisionSound(0.62, 560, true);
+
+    for (let i = 0; i < 34; i++) {
+        createSpark(impactPoint.x, impactPoint.z, i % 4 === 0 ? 0xffffff : accentColor, i % 4 === 0 ? 10 : 7);
+    }
+
+    if (pendingWinnerTimeout !== null) {
+        window.clearTimeout(pendingWinnerTimeout);
+    }
+    if (pendingKoBlankTimeout !== null) {
+        window.clearTimeout(pendingKoBlankTimeout);
+    }
+    pendingKoBlankTimeout = window.setTimeout(() => {
+        pendingKoBlankTimeout = null;
+        showWinnerSpotlightFrame(accentColor);
+    }, KO_FINISH_DURATION_SECONDS * 1000);
+
+    pendingWinnerTimeout = window.setTimeout(() => {
+        pendingWinnerTimeout = null;
+        activeKoBlankOverlay?.remove();
+        activeKoBlankOverlay = null;
+        showWinner(winnerText, accentColor);
+    }, (KO_FINISH_DURATION_SECONDS + KO_WINNER_BLANK_SECONDS) * 1000);
+}
+
 const resetEntityVisualsAndPhysics = (entity: GameEntity, stats: BeybladeStats, startPos: { x: number, y: number }) => {
+    clearLooseBeyParts(entity);
+
     // 1. Remove old visual mesh
     scene.remove(entity.mesh);
 
@@ -4619,11 +5083,24 @@ const resetEntityVisualsAndPhysics = (entity: GameEntity, stats: BeybladeStats, 
     // 6. Clear drift properties (prevents weird movement after reset)
     entity.driftVelocity = undefined;
     entity.driftRotation = undefined;
+    entity.criticalKo = false;
+    entity.looseParts = undefined;
 };
 
 function resetMatch() {
     hasLaunched = false;
     gameOver = false;
+    finishSlowMoUntil = 0;
+    if (pendingKoBlankTimeout !== null) {
+        window.clearTimeout(pendingKoBlankTimeout);
+        pendingKoBlankTimeout = null;
+    }
+    if (pendingWinnerTimeout !== null) {
+        window.clearTimeout(pendingWinnerTimeout);
+        pendingWinnerTimeout = null;
+    }
+    activeKoBlankOverlay?.remove();
+    activeKoBlankOverlay = null;
     clearLaunchCountdown();
     resetMatchCounters();
     multiplayer.localReady = false;
@@ -4636,6 +5113,8 @@ function resetMatch() {
     twoPlayerLaunchAngles = { p1: DEFAULT_LAUNCH_ANGLE, p2: 0 };
     localDiveIntent = 0;
     cpuDiveIntent = 0;
+    cpuLastWallHitAt = -Infinity;
+    cpuHardAiLastReason = 'idle';
 
     // Update action HUD buttons
     resetHint.style.display = 'none';
@@ -4682,6 +5161,9 @@ function resetMatch() {
 
 function clearWinnerOverlay() {
     document.querySelectorAll('.winner-overlay').forEach((overlay) => overlay.remove());
+    document.querySelectorAll('.ko-blank-frame').forEach((overlay) => overlay.remove());
+    document.querySelectorAll('.winner-spotlight-frame').forEach((overlay) => overlay.remove());
+    activeKoBlankOverlay = null;
 }
 
 function requestMatchReset() {
