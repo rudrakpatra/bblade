@@ -1,9 +1,25 @@
-import Matter from 'matter-js';
 import { inject, track } from '@vercel/analytics';
 import Peer, { type DataConnection, type PeerOptions } from 'peerjs';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import {
+    checksumSnapshot,
+    DeterministicBodyView,
+    DeterministicPhysics,
+    RollbackPhysics,
+    type BodyIndex,
+    type DiveInput,
+    type PhysicsBodyConfig,
+    type PhysicsEvent,
+    type PhysicsSnapshot
+} from './physics/deterministicPhysics.ts';
+import {
+    calculateLatencySample,
+    summarizeLatency,
+    type LatencySample
+} from './netcode/latency.ts';
+import { createInviteUrl, getInvitePeerId } from './netcode/invite.ts';
 import "./style.css";
 
 // Initialize Vercel Analytics with configuration
@@ -22,22 +38,7 @@ function trackGameEvent(name: string, props: TAnalyticsProps = {}) {
     }
 }
 
-// --- Physics Setup (Matter.js) ---
-const Engine = Matter.Engine;
-const Bodies = Matter.Bodies;
-const Composite = Matter.Composite;
-const Body = Matter.Body;
-
-// Create an engine
-const engine = Engine.create();
-// Disable global gravity (top-down view)
-engine.gravity.y = 0;
-engine.gravity.scale = 0;
 const clock = new THREE.Clock();
-
-// Increase solver iterations for stability with high speed collisions
-engine.positionIterations = 16;
-engine.velocityIterations = 16;
 
 // --- Rendering Setup (Three.js) ---
 const scene = new THREE.Scene();
@@ -422,7 +423,6 @@ function updateGuide(angleDeg: number) {
 // --- Game Constants ---
 const ARENA_RADIUS = 300;
 const BEYBLADE_RADIUS = 30; // Physics radius
-const FORCE_CONSTANT = 0.00002;
 
 // Helper function for Bowl Shape
 // y = (r / R)^2 * MaxH
@@ -443,33 +443,6 @@ function getArenaNormal(x: number, z: number): THREE.Vector3 {
     // Normal is (-slopeX, 1, -slopeZ)
     return new THREE.Vector3(-slopeX, 1, -slopeZ).normalize();
 }
-
-// Physics Walls (Matter.js) - Keep as is
-function createCircularWall(x: number, y: number, radius: number, segments: number, thickness: number) {
-    const walls: Matter.Body[] = [];
-    const angleStep = (Math.PI * 2) / segments;
-
-    for (let i = 0; i < segments; i++) {
-        const angle = i * angleStep;
-        const cx = x + Math.cos(angle) * radius;
-        const cy = y + Math.sin(angle) * radius;
-
-        // Adjust width to cover the arc (slight overlap)
-        const wallWidth = 2 * radius * Math.tan(Math.PI / segments) * 1.1;
-        const wall = Bodies.rectangle(cx, cy, wallWidth, thickness, {
-            isStatic: true,
-            angle: angle + Math.PI / 2,
-            label: 'Wall'
-        });
-
-        walls.push(wall);
-    }
-    return walls;
-}
-
-// Create physics walls centered at 0,0
-const walls = createCircularWall(0, 0, ARENA_RADIUS, 32, 20);
-Composite.add(engine.world, walls);
 
 // Visual Arena (Three.js)
 const arenaGroup = new THREE.Group();
@@ -1002,6 +975,8 @@ interface BeybladeStats {
     // Arena Forces
     dishForce: number;  // Multiplier for radial force toward center
     curlForce: number;  // Multiplier for tangential clockwise force
+    dishForceModifier: number;
+    curlForceModifier: number;
     // Visual Stats
     beyScale: number;
     wheelWidthFactor: number;
@@ -1035,7 +1010,8 @@ type TLooseBeyPart = {
 };
 
 interface GameEntity {
-    body: Matter.Body;
+    body: DeterministicBodyView;
+    physicsIndex: BodyIndex;
     mesh: THREE.Object3D;
     tiltGroup: THREE.Group;
     spinGroup: THREE.Group;
@@ -1057,8 +1033,6 @@ const FRICTION_LOW = 0.02;
 const FRICTION_HIGH = 0.035; // Controlled grip while diving
 
 const CRIT_SPEED_THRESHOLD = 20;
-const BARRIER_DAMAGE = 20; // Self-damage when hitting walls
-const DIVE_BOOST_FORCE = 0.00012;
 
 type TCriticalOwner = 'player' | 'enemy';
 const criticalStreaks: Record<TCriticalOwner, number> = {
@@ -1102,12 +1076,6 @@ function resetMatchCounters() {
     resetCriticalStreak();
 }
 
-function getMatchCounterSide(entity: GameEntity): TMatchCounterSide | null {
-    if (entity === player) return matchCounters.player;
-    if (entity === enemy) return matchCounters.enemy;
-    return null;
-}
-
 function getCriticalOwner(entity: GameEntity): TCriticalOwner | null {
     if (entity === player) return 'player';
     if (entity === enemy) return 'enemy';
@@ -1142,42 +1110,16 @@ function resetCriticalStreak(owner?: TCriticalOwner | null) {
     syncCriticalStreakHud();
 }
 
-function registerCriticalStreak(entity: GameEntity) {
-    const owner = getCriticalOwner(entity);
-    if (!owner) return 1;
-
-    criticalStreaks[owner] += 1;
-    syncCriticalStreakHud();
-    return criticalStreaks[owner];
-}
-
 function getCriticalStreak(entity: GameEntity) {
     const owner = getCriticalOwner(entity);
     return owner ? criticalStreaks[owner] : 0;
 }
 
-function updateCriticalStreakForHit(entity: GameEntity, isCritical: boolean) {
-    if (isCritical) return registerCriticalStreak(entity);
-    resetCriticalStreak(getCriticalOwner(entity));
-    return 0;
-}
-
-function getCriticalDamageMultiplier(stats: BeybladeStats) {
-    return THREE.MathUtils.clamp(stats.crtAtk / Math.max(1, stats.atk), 1.05, 3);
-}
-
-function applyCriticalStreakDamage(baseDamage: number, attacker: GameEntity, streak: number) {
-    if (!attacker.stats) return baseDamage;
-    return baseDamage * Math.pow(getCriticalDamageMultiplier(attacker.stats), streak);
-}
-
-
-
 const DISH_LOW = 1.5;
 const DISH_HIGH = 6;
 
-const CURL_LOW = 1;
-const CURL_HIGH = 90;
+const CURL_LOW = 1.5;
+const CURL_HIGH = 140;
 
 // Patterns
 interface PhysicsPattern {
@@ -1247,34 +1189,30 @@ type TMultiplayerRole = 'solo' | 'host' | 'guest';
 type TMultiplayerStatus = 'Offline' | 'Hosting' | 'Joining' | 'Connected' | 'Disconnected' | 'Error';
 type TLocalPlayMode = '1p-easy' | '1p-hard' | '2p';
 type TDiveAction = 'dive_on' | 'dive_off';
-type TScheduledDiveEvent = {
-    id: string;
-    side: 'player' | 'enemy';
-    action: TDiveAction;
-    applyAt: number;
-};
-type TBodyStateSnapshot = {
-    x: number;
-    y: number;
-    vx: number;
-    vy: number;
-    angle: number;
-    angularVelocity: number;
-    rpm: number;
-};
 type TMultiplayerMessage =
     | { type: 'hello'; stats: BeybladeStats; name: string }
     | { type: 'stats'; stats: BeybladeStats }
     | { type: 'speed'; speed: TGameSpeedId }
     | { type: 'ready'; launchAngle: number; stats: BeybladeStats }
-    | { type: 'dive'; id: string; action: TDiveAction; applyAt: number }
-    | { type: 'state'; matchTime: number; player: TBodyStateSnapshot; enemy: TBodyStateSnapshot }
+    | { type: 'latency_ping'; sequence: number; hostSentAt: number }
+    | { type: 'latency_pong'; sequence: number; hostSentAt: number; guestReceivedAt: number; guestSentAt: number }
+    | { type: 'latency_config'; inputDelayMs: number; hostMinusGuestMs: number }
+    | {
+        type: 'start';
+        startAtHostMs: number;
+        hostAngle: number;
+        guestAngle: number;
+        inputDelayMs: number;
+        snapshot: PhysicsSnapshot;
+      }
+    | { type: 'dive'; id: string; action: TDiveAction; gameTime: number }
+    | { type: 'authority'; snapshot: PhysicsSnapshot; checksum: string }
     | { type: 'input'; launchAngle?: number; launch?: boolean; pattern?: number; stats?: BeybladeStats }
     | { type: 'reset' };
 
-const MULTIPLAYER_INPUT_DELAY_SECONDS = 0.2;
-const MULTIPLAYER_STATE_SYNC_INTERVAL_SECONDS = 0.1;
-const MULTIPLAYER_STATE_SYNC_CHANCE = 0.5;
+const LATENCY_SAMPLE_COUNT = 8;
+const AUTHORITY_SYNC_INTERVAL_SECONDS = 0.5;
+const DEFAULT_INPUT_DELAY_MS = 200;
 
 const multiplayer = {
     role: 'solo' as TMultiplayerRole,
@@ -1288,11 +1226,15 @@ const multiplayer = {
     localLaunchAngle: DEFAULT_LAUNCH_ANGLE,
     remoteLaunchAngle: DEFAULT_LAUNCH_ANGLE,
     remoteLaunchRequested: false,
-    matchTime: 0,
-    nextStateSyncAt: MULTIPLAYER_STATE_SYNC_INTERVAL_SECONDS,
+    inputDelayMs: DEFAULT_INPUT_DELAY_MS,
+    latencyReady: false,
+    latencySequence: 0,
+    latencySamples: [] as LatencySample[],
+    pendingLatencyPing: null as number | null,
+    hostMinusLocalMs: 0,
+    matchStartHostMs: 0,
+    nextAuthoritySyncAt: AUTHORITY_SYNC_INTERVAL_SECONDS,
     diveEventSeq: 0,
-    diveQueue: [] as TScheduledDiveEvent[],
-    processedDiveEventIds: new Set<string>(),
     analyticsConnectedTracked: false
 };
 let localPlayMode: TLocalPlayMode = '1p-easy';
@@ -1616,6 +1558,8 @@ const PLAYER_STATS: BeybladeStats = {
     // Arena Forces
     dishForce: 2, // DISH_LOW
     curlForce: 1, // CURL_LOW
+    dishForceModifier: 1,
+    curlForceModifier: 1,
     dragFactor: 0.000
 };
 
@@ -1659,6 +1603,8 @@ const ENEMY_STATS: BeybladeStats = {
     // Arena Forces
     dishForce: 2, // DISH_LOW
     curlForce: 1, // CURL_LOW
+    dishForceModifier: 1,
+    curlForceModifier: 1,
     dragFactor: 0.000
 };
 
@@ -1747,16 +1693,43 @@ const COMBAT_FIELDS = [
     { key: 'crtAtk', label: 'CRIT ATK', hint: 'Crit Dmg', type: 'number', step: 1 },
 ];
 
-function createBeyblade(x: number, y: number, stats: BeybladeStats): GameEntity {
-    const density = stats.densityBase * stats.wt;
-
-    const body = Bodies.circle(x, y, BEYBLADE_RADIUS, {
+function toPhysicsBodyConfig(stats: BeybladeStats): PhysicsBodyConfig {
+    return {
+        maxRpm: stats.maxRpm,
+        attack: stats.atk,
+        defense: stats.def,
+        stamina: stats.sta,
+        speed: stats.spd,
+        weight: stats.wt,
+        criticalAttack: stats.crtAtk,
         restitution: stats.restitution,
-        friction: stats.friction,
-        frictionAir: stats.frictionAir,
-        density: density,
-        label: 'Beyblade'
-    });
+        orbitDrag: FRICTION_LOW,
+        diveDrag: FRICTION_HIGH,
+        orbitDish: DISH_LOW,
+        diveDish: DISH_HIGH,
+        orbitCurl: CURL_HIGH,
+        diveCurl: CURL_LOW,
+        dishModifier: stats.dishForceModifier,
+        curlModifier: stats.curlForceModifier,
+        radius: stats.radius
+    };
+}
+
+const physicsWorld = new DeterministicPhysics(
+    toPhysicsBodyConfig(PLAYER_STATS),
+    toPhysicsBodyConfig(ENEMY_STATS)
+);
+const rollbackPhysics = new RollbackPhysics(physicsWorld);
+
+function createBeyblade(x: number, y: number, stats: BeybladeStats): GameEntity {
+    const physicsIndex = entities.length as BodyIndex;
+    physicsWorld.configureBody(physicsIndex, toPhysicsBodyConfig(stats));
+    physicsWorld.resetBody(physicsIndex, x, y);
+    const body = new DeterministicBodyView(physicsWorld, physicsIndex);
+    body.restitution = stats.restitution;
+    body.friction = stats.friction;
+    body.frictionAir = stats.frictionAir;
+    body.density = stats.densityBase * stats.wt;
 
     // Visuals
     const { mesh, tiltGroup, spinGroup } = createBeybladeMesh(stats);
@@ -1766,16 +1739,20 @@ function createBeyblade(x: number, y: number, stats: BeybladeStats): GameEntity 
     const trail = new TrailSystem(stats.trailColor, scene);
 
     // Initial Spawn
-    Composite.add(engine.world, body);
-
     const entity: GameEntity = {
         body,
+        physicsIndex,
         mesh,
         tiltGroup,
         spinGroup,
         trail,
         stats,
-        currentRpm: 0
+        get currentRpm() {
+            return physicsWorld.getBody(physicsIndex).rpm;
+        },
+        set currentRpm(value: number | undefined) {
+            physicsWorld.setRpm(physicsIndex, value || 0);
+        }
     };
     entities.push(entity);
 
@@ -1904,6 +1881,7 @@ function updatePhysicsFromPattern() {
     player.stats.curlForce = p.curl;
     player.body.frictionAir = p.drag;
     player.stats.frictionAir = p.drag;
+    physicsWorld.setDive(player.physicsIndex, currentPatternIndex === 1 ? 1 : 0);
 }
 
 function updateCpuPhysicsFromPattern() {
@@ -1914,6 +1892,7 @@ function updateCpuPhysicsFromPattern() {
     enemy.stats.curlForce = p.curl;
     enemy.body.frictionAir = p.drag;
     enemy.stats.frictionAir = p.drag;
+    physicsWorld.setDive(enemy.physicsIndex, cpuPatternIndex === 1 ? 1 : 0);
 }
 
 function isHardCpuMode() {
@@ -2120,7 +2099,6 @@ const enemyMeterEl = document.getElementById('enemy-meter') as HTMLMeterElement;
 
 
 // --- Spark System ---
-const Events = Matter.Events;
 
 interface Spark {
     mesh: THREE.Mesh;
@@ -2337,21 +2315,7 @@ function createReverbImpulse(seconds: number, decay: number) {
 
 const criticalReverbImpulse = createReverbImpulse(1.45, 2.4);
 
-function getCollisionWorldPoint(pair: Matter.Pair) {
-    const supports = pair.collision.supports;
-    if (!supports.length) return undefined;
-
-    const point = supports.reduce(
-        (acc, support) => {
-            acc.x += support.x;
-            acc.y += support.y;
-            return acc;
-        },
-        { x: 0, y: 0 }
-    );
-    const x = point.x / supports.length;
-    const z = point.y / supports.length;
-
+function getCollisionWorldPoint(x: number, z: number) {
     return new THREE.Vector3(x, getArenaHeight(x, z) + 18, z);
 }
 
@@ -2538,6 +2502,10 @@ function playCollisionSound(intensity: number, baseFrequency: number, isCritical
     });
 }
 
+/*
+ * The former Matter.js collision callback lived here. Collision detection,
+ * combat damage, critical streaks, and wall damage are now emitted by the
+ * deterministic simulation and handled below.
 Events.on(engine, 'collisionStart', (event) => {
     event.pairs.forEach((pair) => {
         const entityA = entities.find(e => e.body === pair.bodyA);
@@ -2674,27 +2642,72 @@ Events.on(engine, 'collisionStart', (event) => {
 
     });
 });
+*/
+
+function syncMatchStateFromPhysics() {
+    const snapshot = physicsWorld.snapshot();
+    criticalStreaks.player = snapshot.criticalStreak[player.physicsIndex];
+    criticalStreaks.enemy = snapshot.criticalStreak[enemy.physicsIndex];
+    matchCounters.player.criticalHits = snapshot.criticalHits[player.physicsIndex];
+    matchCounters.enemy.criticalHits = snapshot.criticalHits[enemy.physicsIndex];
+    matchCounters.player.wallDings = snapshot.wallHits[player.physicsIndex];
+    matchCounters.enemy.wallDings = snapshot.wallHits[enemy.physicsIndex];
+    syncCriticalStreakHud();
+    syncDivePresentationFromPhysics();
+}
+
+function handlePhysicsEvents(events: PhysicsEvent[]) {
+    events.forEach((event) => {
+        if (event.kind === 'wall') {
+            const entity = entities[event.body];
+            if (!entity) return;
+            if (entity === enemy && isHardCpuMode()) {
+                cpuLastWallHitAt = clock.getElapsedTime();
+                cpuNextDiveSwitchAt = Math.min(cpuNextDiveSwitchAt, cpuLastWallHitAt);
+            }
+            notifyTutorialWallHit(entity, { dmg: event.damage, rpmLost: event.rpmLost });
+            for (let index = 0; index < 5; index += 1) {
+                createSpark(event.x, event.y, 0xaaaaaa, 2);
+            }
+            playCollisionSound(0.5, 100 * 1.67);
+            return;
+        }
+
+        const firstReport = event.reports[0];
+        const secondReport = event.reports[1];
+        const isHighSpeed = firstReport.critical || secondReport.critical;
+        const count = isHighSpeed ? 24 : 3;
+        const sparkSpeed = isHighSpeed ? 9 : 2;
+        for (let index = 0; index < count; index += 1) {
+            if (firstReport.critical) createSpark(event.x, event.y, player.stats?.trailColor || 0xffffff, sparkSpeed);
+            if (secondReport.critical) createSpark(event.x, event.y, enemy.stats?.trailColor || 0xffffff, sparkSpeed);
+            if (!isHighSpeed) createSpark(event.x, event.y, 0xaaaaaa, sparkSpeed);
+        }
+        if (isHighSpeed) {
+            for (let index = 0; index < 10; index += 1) createSpark(event.x, event.y, 0xffffff, sparkSpeed + 3);
+            triggerCriticalFeedback(getCollisionWorldPoint(event.x, event.y));
+        }
+
+        event.reports.forEach((report) => {
+            const attacker = entities[report.attacker];
+            const target = entities[report.target];
+            if (!attacker?.stats || !target?.stats || !report.critical) return;
+            if ((target.currentRpm || 0) <= 0 && report.damage > 0) target.criticalKo = true;
+            notifyTutorialCriticalHit(attacker, {
+                crit: attacker.stats.crtAtk,
+                def: target.stats.def,
+                dmg: report.damage,
+                rpmLost: report.rpmLost,
+                streak: report.streak
+            });
+        });
+        playCollisionSound(isHighSpeed ? 0.34 : 0.2, isHighSpeed ? 675 : 200, isHighSpeed);
+    });
+    syncMatchStateFromPhysics();
+}
 
 
 // --- Game Loop ---
-type TNavigatorWithDeviceMemory = Navigator & { deviceMemory?: number };
-
-function shouldUseReducedPhysicsWork() {
-    const nav = navigator as TNavigatorWithDeviceMemory;
-    const cores = nav.hardwareConcurrency || 4;
-    const memory = nav.deviceMemory;
-    const coarsePointer = window.matchMedia?.('(pointer: coarse)').matches ?? false;
-    const compactScreen = Math.min(window.innerWidth, window.innerHeight) < 820;
-    return cores <= 4 || (memory !== undefined && memory <= 4) || (coarsePointer && compactScreen);
-}
-
-const REDUCED_PHYSICS_WORK = shouldUseReducedPhysicsWork();
-
-function getPhysicsSubsteps(speedMultiplier: number) {
-    if (speedMultiplier <= 0.35) return REDUCED_PHYSICS_WORK ? 2 : 3;
-    if (speedMultiplier >= 1.75) return REDUCED_PHYSICS_WORK ? 3 : 4;
-    return REDUCED_PHYSICS_WORK ? 3 : 4;
-}
 
 function scatterBeyParts(entity: GameEntity) {
     if (entity.looseParts?.length) return;
@@ -2758,83 +2771,33 @@ function clearLooseBeyParts(entity: GameEntity) {
 }
 
 let frameCounter = 0;
+let previousAnimationTimeMs = performance.now();
 
 
 function animate() {
     requestAnimationFrame(animate);
 
     // Physics Update
+    const animationTimeMs = performance.now();
+    const wallDeltaSeconds = Math.min(0.1, Math.max(0, (animationTimeMs - previousAnimationTimeMs) / 1000));
+    previousAnimationTimeMs = animationTimeMs;
     const simulationPaused = tutorialPauseActive;
     const finishSlowMoActive = clock.getElapsedTime() < finishSlowMoUntil;
     const speedMultiplier = GAME_SPEEDS[currentGameSpeed].multiplier
         * (tutorialSlowMoActive ? 0.28 : 1)
         * (finishSlowMoActive ? 0.18 : 1);
-    const physicsSubsteps = simulationPaused ? 0 : getPhysicsSubsteps(speedMultiplier);
-    const subStepDelta = physicsSubsteps > 0 ? ((1000 / 60) * speedMultiplier) / physicsSubsteps : 0;
     if (!simulationPaused) updateCpuDive(clock.getElapsedTime());
-    for (let i = 0; i < physicsSubsteps && !simulationPaused; i++) {
-        processScheduledDiveEvents();
-        Engine.update(engine, subStepDelta);
-
-        if (hasLaunched) {
-            entities.forEach(entity => {
-                if (entity.isDead) return; // Skip physics forces for dead entities
-
-                // Beyblade-Specific Forces (Dish + Curl)
-                if (entity.stats) {
-                    const px = entity.body.position.x;
-                    const py = entity.body.position.y;
-                    const dist = Math.sqrt(px * px + py * py);
-
-                    // --- Speed Threshold Visuals (Ground Sparks) ---
-                    const speed = entity.body.speed;
-                    if (speed > CRIT_SPEED_THRESHOLD) {
-                        // Throttled spawn (random chance per frame)
-                        if (Math.random() < 0.3) {
-                            // Spark at contact point (approximate ground contact)
-                            // We can use current position, maybe slightly offset opposite to velocity
-                            createSpark(px, py, entity.stats.trailColor, 2);
-                        }
-                    }
-
-                    // Normalized radial direction (toward center)
-                    const safeDist = Math.max(dist, 1);
-                    const radialX = -px / safeDist;
-                    const radialY = -py / safeDist;
-
-
-                    // Tangent direction (perpendicular, clockwise)
-                    // Rotate radial 90° clockwise: (x, y) -> (y, -x)
-                    const tangentX = radialY;
-                    const tangentY = -radialX;
-
-                    if (entity.currentRpm === undefined) return;
-                    // const life = entity.currentRpm / entity.stats.maxRpm;
-                    // Calculate force magnitudes
-                    const dishMagnitude = FORCE_CONSTANT * entity.body.mass * safeDist * entity.stats.dishForce;
-                    const curlMagnitude = FORCE_CONSTANT * entity.body.mass * (1 - safeDist / ARENA_RADIUS) * entity.stats.curlForce;
-
-                    // Apply combined force
-                    Body.applyForce(entity.body, entity.body.position, {
-                        x: radialX * dishMagnitude + tangentX * curlMagnitude,
-                        y: radialY * dishMagnitude + tangentY * curlMagnitude
-                    });
-
-                    const isDiving = (entity === player && currentPatternIndex === 1) || (entity === enemy && cpuPatternIndex === 1);
-                    if (isDiving && speed > 0.1) {
-                        Body.applyForce(entity.body, entity.body.position, {
-                            x: (entity.body.velocity.x / speed) * DIVE_BOOST_FORCE * entity.body.mass,
-                            y: (entity.body.velocity.y / speed) * DIVE_BOOST_FORCE * entity.body.mass
-                        });
-                    }
-                }
-            });
-        }
-        if (hasLaunched && multiplayer.role !== 'solo') {
-            multiplayer.matchTime += subStepDelta / 1000;
-        }
+    if (!simulationPaused && hasLaunched && !gameOver) {
+        const targetGameTime = getTargetSimulationTime(wallDeltaSeconds, speedMultiplier);
+        const physicsEvents = rollbackPhysics.advanceTo(targetGameTime);
+        handlePhysicsEvents(physicsEvents);
+        entities.forEach((entity) => {
+            if (!entity.isDead && entity.stats && entity.body.speed > CRIT_SPEED_THRESHOLD && Math.random() < 0.3) {
+                createSpark(entity.body.position.x, entity.body.position.y, entity.stats.trailColor, 2);
+            }
+        });
+        maybeSendAuthoritativePhysicsSnapshot();
     }
-    if (!simulationPaused) maybeSendMatterWorldStateSample();
 
     // Update Visuals
     entities.forEach(entity => {
@@ -2901,7 +2864,7 @@ function animate() {
                 }
 
                 // Remove from Physics World
-                Composite.remove(engine.world, entity.body);
+                entity.body.setActive(false);
 
                 // Win Condition Check
                 if (!gameOver) {
@@ -2988,26 +2951,7 @@ function animate() {
         // Update Trail - Lift slightly above surface
         entity.trail.update(x, y + 2, z);
 
-        // --- RPG Stats Logic ---
-        if (entity.stats && entity.currentRpm !== undefined) {
-            // Stamina Decay
-            // Lose STA per second
-            const decay = entity.stats.sta * (subStepDelta / 1000) * physicsSubsteps;
-            if (entity.currentRpm > 0) {
-                entity.currentRpm = Math.max(0, entity.currentRpm - decay);
-            }
-
-            // Force Physics to match RPM Health
-            // RPM to Angular Velocity (rad/s) approx factor
-            // 100 RPM ~= 1 rad/s (simplified for game feel)
-            const targetAngularVelocity = entity.currentRpm / 100;
-
-            // Direction varies? For now assume positive/counter-clockwise.
-            // If it was spinning, keep sign. If 0, no spin.
-            const sign = Math.sign(entity.body.angularVelocity) || 1;
-
-            Body.setAngularVelocity(entity.body, targetAngularVelocity * sign);
-        }
+        // RPM decay and angular velocity are part of the deterministic state.
     });
 
     // Update Sparks
@@ -4193,8 +4137,11 @@ function setMultiplayerStatus(status: TMultiplayerStatus) {
     document.querySelectorAll<HTMLElement>('.multiplayer-status').forEach((el) => {
         el.textContent = getMultiplayerStatusText();
     });
-    document.querySelectorAll<HTMLInputElement>('.multiplayer-link').forEach((input) => {
-        input.value = multiplayer.joinLink;
+    document.querySelectorAll<HTMLButtonElement>('.multiplayer-copy-invite').forEach((button) => {
+        button.disabled = !multiplayer.joinLink;
+        button.textContent = multiplayer.joinLink
+            ? 'Click to copy invite link'
+            : 'Creating invite link…';
     });
     syncLaunchSetupUi();
 }
@@ -4225,6 +4172,13 @@ function cleanupMultiplayer() {
     multiplayer.localLaunchAngle = DEFAULT_LAUNCH_ANGLE;
     multiplayer.remoteLaunchAngle = DEFAULT_LAUNCH_ANGLE;
     multiplayer.remoteLaunchRequested = false;
+    multiplayer.inputDelayMs = DEFAULT_INPUT_DELAY_MS;
+    multiplayer.latencyReady = false;
+    multiplayer.latencySequence = 0;
+    multiplayer.latencySamples = [];
+    multiplayer.pendingLatencyPing = null;
+    multiplayer.hostMinusLocalMs = 0;
+    multiplayer.matchStartHostMs = 0;
     multiplayer.analyticsConnectedTracked = false;
     setMultiplayerStatus('Offline');
     syncOpponentHudLabel();
@@ -4242,19 +4196,16 @@ function setLocalPlayMode(mode: TLocalPlayMode) {
 
 function getMultiplayerStatusText() {
     if (multiplayer.role === 'solo') return 'Ready';
-    if (multiplayer.status === 'Connected') return `${multiplayer.role === 'host' ? 'Hosting' : 'Joined'} - connected`;
+    if (multiplayer.status === 'Connected') {
+        const latency = multiplayer.latencyReady ? ` · ${multiplayer.inputDelayMs}ms input delay` : ' · measuring latency';
+        return `${multiplayer.role === 'host' ? 'Hosting' : 'Joined'} - connected${latency}`;
+    }
     return `${multiplayer.role === 'host' ? 'Host' : 'Join'} - ${multiplayer.status}`;
 }
 
 function getOpponentLabel() {
     if (localPlayMode === '2p' || multiplayer.role !== 'solo') return 'P2';
     return localPlayMode === '1p-hard' ? 'CPU2' : 'CPU1';
-}
-
-function createJoinLink(peerId: string) {
-    const url = new URL(window.location.href);
-    url.searchParams.set('joinPeer', peerId);
-    return url.toString();
 }
 
 function sendMultiplayerMessage(message: TMultiplayerMessage) {
@@ -4296,104 +4247,185 @@ function divePatternToAction(pattern: number): TDiveAction {
     return pattern === 1 ? 'dive_on' : 'dive_off';
 }
 
-function resetMultiplayerDiveQueue() {
-    multiplayer.matchTime = 0;
-    multiplayer.nextStateSyncAt = MULTIPLAYER_STATE_SYNC_INTERVAL_SECONDS;
-    multiplayer.diveQueue = [];
-    multiplayer.processedDiveEventIds.clear();
+function resetMultiplayerNetcode() {
+    multiplayer.matchStartHostMs = 0;
+    multiplayer.nextAuthoritySyncAt = AUTHORITY_SYNC_INTERVAL_SECONDS;
+    multiplayer.diveEventSeq = 0;
+    if (multiplayer.role !== 'solo') multiplayer.latencyReady = false;
+    rollbackPhysics.resetHistory();
 }
 
-function queueDiveEvent(event: TScheduledDiveEvent) {
-    if (multiplayer.processedDiveEventIds.has(event.id)) return;
-    if (multiplayer.diveQueue.some((queued) => queued.id === event.id)) return;
-    multiplayer.diveQueue.push(event);
-    multiplayer.diveQueue.sort((a, b) => a.applyAt - b.applyAt);
-}
-
-function queueLocalDiveEvent(pattern: number) {
-    if (!isOnlineMatch()) return;
-    if (!multiplayer.conn?.open) return;
-    const action = divePatternToAction(pattern);
-    const id = `${multiplayer.peerId || multiplayer.role}-${++multiplayer.diveEventSeq}`;
-    const applyAt = multiplayer.matchTime + MULTIPLAYER_INPUT_DELAY_SECONDS;
-    queueDiveEvent({ id, side: 'player', action, applyAt });
-    sendMultiplayerMessage({ type: 'dive', id, action, applyAt });
-}
-
-function applyScheduledDiveEvent(event: TScheduledDiveEvent) {
-    const pattern = diveActionToPattern(event.action);
-    if (event.side === 'player') {
-        applyPlayerDivePattern(pattern);
-    } else {
-        setCpuPattern(pattern);
-    }
-    multiplayer.processedDiveEventIds.add(event.id);
-}
-
-function processScheduledDiveEvents() {
-    if (!isOnlineMatch() || !hasLaunched || gameOver) return;
-    while (multiplayer.diveQueue.length > 0 && multiplayer.diveQueue[0].applyAt <= multiplayer.matchTime + 0.000001) {
-        const event = multiplayer.diveQueue.shift();
-        if (event) applyScheduledDiveEvent(event);
-    }
-}
-
-function getBodyStateSnapshot(entity: GameEntity): TBodyStateSnapshot {
+function swapSnapshotSides(snapshot: PhysicsSnapshot): PhysicsSnapshot {
     return {
-        x: entity.body.position.x,
-        y: entity.body.position.y,
-        vx: entity.body.velocity.x,
-        vy: entity.body.velocity.y,
-        angle: entity.body.angle,
-        angularVelocity: entity.body.angularVelocity,
-        rpm: entity.currentRpm || 0
+        version: 1,
+        timeTicks: snapshot.timeTicks,
+        bodies: [{ ...snapshot.bodies[1] }, { ...snapshot.bodies[0] }],
+        dive: [snapshot.dive[1], snapshot.dive[0]],
+        touching: snapshot.touching,
+        wallTouching: [snapshot.wallTouching[1], snapshot.wallTouching[0]],
+        criticalStreak: [snapshot.criticalStreak[1], snapshot.criticalStreak[0]],
+        criticalHits: [snapshot.criticalHits[1], snapshot.criticalHits[0]],
+        wallHits: [snapshot.wallHits[1], snapshot.wallHits[0]]
     };
 }
 
-function averageAngle(localAngle: number, remoteAngle: number) {
-    let delta = remoteAngle - localAngle;
-    while (delta > Math.PI) delta -= Math.PI * 2;
-    while (delta < -Math.PI) delta += Math.PI * 2;
-    return localAngle + delta * 0.5;
+function toCanonicalSnapshot(snapshot: PhysicsSnapshot) {
+    return multiplayer.role === 'guest' ? swapSnapshotSides(snapshot) : snapshot;
 }
 
-function blendEntityWithRemoteState(entity: GameEntity, remote: TBodyStateSnapshot) {
-    if (entity.isDead) return;
-    Body.setPosition(entity.body, {
-        x: (entity.body.position.x + remote.x) * 0.5,
-        y: (entity.body.position.y + remote.y) * 0.5
-    });
-    Body.setVelocity(entity.body, {
-        x: (entity.body.velocity.x + remote.vx) * 0.5,
-        y: (entity.body.velocity.y + remote.vy) * 0.5
-    });
-    Body.setAngle(entity.body, averageAngle(entity.body.angle, remote.angle));
-    Body.setAngularVelocity(entity.body, (entity.body.angularVelocity + remote.angularVelocity) * 0.5);
-    if (entity.currentRpm !== undefined && Number.isFinite(remote.rpm)) {
-        entity.currentRpm = (entity.currentRpm + remote.rpm) * 0.5;
+function fromCanonicalSnapshot(snapshot: PhysicsSnapshot) {
+    return multiplayer.role === 'guest' ? swapSnapshotSides(snapshot) : snapshot;
+}
+
+function getEstimatedHostTimeMs() {
+    return performance.now() + multiplayer.hostMinusLocalMs;
+}
+
+function getTargetSimulationTime(wallDeltaSeconds: number, speedMultiplier: number) {
+    if (isOnlineMatch() && multiplayer.matchStartHostMs > 0) {
+        const synchronizedElapsed = Math.max(0, (getEstimatedHostTimeMs() - multiplayer.matchStartHostMs) / 1000);
+        return Math.max(physicsWorld.gameTime, synchronizedElapsed * speedMultiplier);
     }
+    return physicsWorld.gameTime + wallDeltaSeconds * speedMultiplier;
 }
 
-function applyRemoteMatterWorldState(message: Extract<TMultiplayerMessage, { type: 'state' }>) {
-    if (!isOnlineMatch() || !hasLaunched || gameOver) return;
-    blendEntityWithRemoteState(enemy, message.player);
-    blendEntityWithRemoteState(player, message.enemy);
+function syncDivePresentationFromPhysics() {
+    const playerDive = physicsWorld.getDive(player.physicsIndex);
+    const enemyDive = physicsWorld.getDive(enemy.physicsIndex);
+    currentPatternIndex = playerDive;
+    cpuPatternIndex = enemyDive;
+    cycleBtn.classList.toggle('active', playerDive === 1);
+    cpuCycleBtn.classList.toggle('active', enemyDive === 1);
 }
 
-function maybeSendMatterWorldStateSample() {
-    if (!isOnlineMatch() || !multiplayer.conn?.open || !hasLaunched || gameOver) return;
-    if (multiplayer.matchTime + 0.000001 < multiplayer.nextStateSyncAt) return;
-    multiplayer.nextStateSyncAt += MULTIPLAYER_STATE_SYNC_INTERVAL_SECONDS;
-    if (multiplayer.nextStateSyncAt <= multiplayer.matchTime) {
-        multiplayer.nextStateSyncAt = multiplayer.matchTime + MULTIPLAYER_STATE_SYNC_INTERVAL_SECONDS;
+function reopenOutcomeAfterRollback() {
+    if (!gameOver) return;
+    if (pendingKoBlankTimeout !== null) {
+        window.clearTimeout(pendingKoBlankTimeout);
+        pendingKoBlankTimeout = null;
     }
-    if (Math.random() > MULTIPLAYER_STATE_SYNC_CHANCE) return;
+    if (pendingWinnerTimeout !== null) {
+        window.clearTimeout(pendingWinnerTimeout);
+        pendingWinnerTimeout = null;
+    }
+    clearWinnerOverlay();
+    entities.forEach((entity) => {
+        if (entity.isDead && entity.stats) {
+            applyStatsToEntityPreservingMatchState(entity, entity.stats);
+        }
+        entity.isDead = false;
+        entity.driftVelocity = undefined;
+        entity.driftRotation = undefined;
+        entity.criticalKo = false;
+        entity.body.setActive(true);
+    });
+    gameOver = false;
+    finishSlowMoUntil = 0;
+}
+
+function scheduleDiveInput(input: DiveInput) {
+    const result = rollbackPhysics.scheduleInput(input);
+    if (result.rolledBack) {
+        reopenOutcomeAfterRollback();
+        syncDivePresentationFromPhysics();
+        syncMatchStateFromPhysics();
+        if (multiplayer.role === 'host') sendAuthoritativePhysicsSnapshot();
+    }
+    return result;
+}
+
+function queueLocalDiveEvent(pattern: number) {
+    if (!isOnlineMatch() || !multiplayer.conn?.open) return;
+    const action = divePatternToAction(pattern);
+    const id = `${multiplayer.peerId || multiplayer.role}-${++multiplayer.diveEventSeq}`;
+    const speedMultiplier = GAME_SPEEDS[currentGameSpeed].multiplier;
+    const gameTime = physicsWorld.gameTime + (multiplayer.inputDelayMs / 1000) * speedMultiplier;
+    scheduleDiveInput({ id, body: player.physicsIndex, diving: pattern === 1 ? 1 : 0, gameTime });
+    sendMultiplayerMessage({ type: 'dive', id, action, gameTime });
+}
+
+function sendAuthoritativePhysicsSnapshot() {
+    if (multiplayer.role !== 'host' || !multiplayer.conn?.open || !hasLaunched) return;
+    const snapshot = toCanonicalSnapshot(physicsWorld.snapshot());
     sendMultiplayerMessage({
-        type: 'state',
-        matchTime: multiplayer.matchTime,
-        player: getBodyStateSnapshot(player),
-        enemy: getBodyStateSnapshot(enemy)
+        type: 'authority',
+        snapshot,
+        checksum: checksumSnapshot(snapshot)
     });
+}
+
+function maybeSendAuthoritativePhysicsSnapshot() {
+    if (multiplayer.role !== 'host' || physicsWorld.gameTime < multiplayer.nextAuthoritySyncAt) return;
+    multiplayer.nextAuthoritySyncAt = physicsWorld.gameTime + AUTHORITY_SYNC_INTERVAL_SECONDS;
+    sendAuthoritativePhysicsSnapshot();
+}
+
+function sendNextLatencyPing() {
+    if (multiplayer.role !== 'host' || !multiplayer.conn?.open) return;
+    const sequence = ++multiplayer.latencySequence;
+    const hostSentAt = performance.now();
+    multiplayer.pendingLatencyPing = sequence;
+    sendMultiplayerMessage({ type: 'latency_ping', sequence, hostSentAt });
+}
+
+function beginLatencyMeasurement() {
+    if (multiplayer.role !== 'host') return;
+    multiplayer.latencyReady = false;
+    multiplayer.latencySequence = 0;
+    multiplayer.latencySamples = [];
+    sendNextLatencyPing();
+}
+
+function finishLatencyMeasurement() {
+    const summary = summarizeLatency(multiplayer.latencySamples);
+    multiplayer.inputDelayMs = summary.inputDelayMs;
+    multiplayer.hostMinusLocalMs = 0;
+    multiplayer.latencyReady = true;
+    sendMultiplayerMessage({
+        type: 'latency_config',
+        inputDelayMs: multiplayer.inputDelayMs,
+        hostMinusGuestMs: summary.hostMinusGuestMs
+    });
+    setMultiplayerStatus('Connected');
+    tryStartMultiplayerCountdown();
+}
+
+function prepareOnlinePhysics(hostAngle: number, guestAngle: number) {
+    physicsWorld.reset();
+    physicsWorld.configureBody(player.physicsIndex, toPhysicsBodyConfig(PLAYER_STATS));
+    physicsWorld.configureBody(enemy.physicsIndex, toPhysicsBodyConfig(ENEMY_STATS));
+    launchEntity(player, hostAngle);
+    launchEntity(enemy, guestAngle);
+    rollbackPhysics.resetHistory();
+    syncMatchStateFromPhysics();
+}
+
+function completePreparedOnlineLaunch() {
+    hasLaunched = true;
+    gameOver = false;
+    trackGameStarted();
+    finishLocalLaunch();
+}
+
+function scheduleSynchronizedLaunch(startAtHostMs: number) {
+    clearLaunchCountdown();
+    launchContainer.style.display = 'none';
+    guideMesh.visible = false;
+    const overlay = document.createElement('div');
+    overlay.className = 'launch-countdown-overlay';
+    overlay.innerHTML = '<div class="launch-countdown-text">3</div>';
+    document.body.appendChild(overlay);
+    launchCountdownOverlay = overlay;
+    launchCountdownInterval = window.setInterval(() => {
+        const remainingMs = startAtHostMs - getEstimatedHostTimeMs();
+        const text = overlay.querySelector<HTMLElement>('.launch-countdown-text');
+        if (remainingMs > 0) {
+            if (text) text.textContent = String(Math.max(1, Math.ceil(remainingMs / 1000)));
+            return;
+        }
+        clearLaunchCountdown();
+        completePreparedOnlineLaunch();
+    }, 16);
 }
 
 function sendMultiplayerReady() {
@@ -4408,7 +4440,20 @@ function sendMultiplayerReady() {
 function tryStartMultiplayerCountdown() {
     if (multiplayer.role === 'solo' || hasLaunched || launchCountdownOverlay) return;
     if (!multiplayer.localReady || !multiplayer.remoteReady) return;
-    startLaunchCountdown(() => startLocalSimulatedMatch(multiplayer.localLaunchAngle));
+    if (multiplayer.role !== 'host' || !multiplayer.latencyReady) return;
+    const startAtHostMs = performance.now() + 3_250;
+    multiplayer.matchStartHostMs = startAtHostMs;
+    prepareOnlinePhysics(multiplayer.localLaunchAngle, multiplayer.remoteLaunchAngle);
+    const snapshot = toCanonicalSnapshot(physicsWorld.snapshot());
+    sendMultiplayerMessage({
+        type: 'start',
+        startAtHostMs,
+        hostAngle: multiplayer.localLaunchAngle,
+        guestAngle: multiplayer.remoteLaunchAngle,
+        inputDelayMs: multiplayer.inputDelayMs,
+        snapshot
+    });
+    scheduleSynchronizedLaunch(startAtHostMs);
 }
 
 function markLocalMultiplayerReady() {
@@ -4421,26 +4466,7 @@ function markLocalMultiplayerReady() {
 }
 
 function launchEntity(entity: GameEntity, angleDeg: number) {
-    const angleRad = (angleDeg * Math.PI) / 180;
-    const launchSpeed = entity.stats ? entity.stats.spd : 200;
-    Body.setVelocity(entity.body, {
-        x: Math.cos(angleRad) * launchSpeed * 0.1,
-        y: Math.sin(angleRad) * launchSpeed * 0.1
-    });
-
-    if (entity.stats) {
-        entity.currentRpm = entity.stats.maxRpm;
-        Body.setAngularVelocity(entity.body, entity.currentRpm / 100);
-    } else {
-        Body.setAngularVelocity(entity.body, 50);
-    }
-}
-
-function primeEntityForMatch(entity: GameEntity) {
-    if (entity.stats) {
-        entity.currentRpm = entity.stats.maxRpm;
-        Body.setAngularVelocity(entity.body, entity.currentRpm / 100);
-    }
+    physicsWorld.launchBody(entity.physicsIndex, angleDeg);
 }
 
 function finishLocalLaunch() {
@@ -4465,7 +4491,9 @@ function trackGameStarted() {
 
 function startLocalSimulatedMatch(localLaunchAngle: number, localOpponentAngle?: number) {
     resetMatchCounters();
-    resetMultiplayerDiveQueue();
+    physicsWorld.reset();
+    physicsWorld.configureBody(player.physicsIndex, toPhysicsBodyConfig(PLAYER_STATS));
+    physicsWorld.configureBody(enemy.physicsIndex, toPhysicsBodyConfig(ENEMY_STATS));
     hasLaunched = true;
     trackGameStarted();
     if (tutorialModeActive && tutorialPhase === 'launch') {
@@ -4479,17 +4507,13 @@ function startLocalSimulatedMatch(localLaunchAngle: number, localOpponentAngle?:
     cpuHardAiLastReason = 'idle';
     scheduleNextCpuDiveSwitch(clock.getElapsedTime() + 0.5);
     launchEntity(player, localLaunchAngle);
-    if (multiplayer.role !== 'solo') {
-        if (multiplayer.remoteReady || multiplayer.remoteLaunchRequested) launchEntity(enemy, multiplayer.remoteLaunchAngle);
-        else primeEntityForMatch(enemy);
-    } else {
-        const opponentAngle = typeof localOpponentAngle === 'number'
-            ? localOpponentAngle
-            : localPlayMode === '2p'
-                ? (localLaunchAngle + 180) % 360
-                : Math.random() * 360;
-        launchEntity(enemy, opponentAngle);
-    }
+    const opponentAngle = typeof localOpponentAngle === 'number'
+        ? localOpponentAngle
+        : localPlayMode === '2p'
+            ? (localLaunchAngle + 180) % 360
+            : Math.random() * 360;
+    launchEntity(enemy, opponentAngle);
+    rollbackPhysics.resetHistory();
     finishLocalLaunch();
 }
 
@@ -4546,14 +4570,15 @@ function applyStatsToEntityPreservingMatchState(entity: GameEntity, stats: Beybl
     entity.spinGroup = newVisuals.spinGroup;
     scene.add(entity.mesh);
 
-    Body.setDensity(entity.body, stats.densityBase * stats.wt);
+    physicsWorld.configureBody(entity.physicsIndex, toPhysicsBodyConfig(stats));
+    entity.body.density = stats.densityBase * stats.wt;
     entity.body.restitution = stats.restitution;
     entity.body.friction = stats.friction;
     entity.body.frictionAir = stats.frictionAir;
-    Body.setPosition(entity.body, currentPosition);
-    Body.setVelocity(entity.body, currentVelocity);
-    Body.setAngularVelocity(entity.body, currentAngularVelocity);
-    Body.setAngle(entity.body, currentAngle);
+    entity.body.setPosition(currentPosition);
+    entity.body.setVelocity(currentVelocity);
+    entity.body.setAngularVelocity(currentAngularVelocity);
+    entity.body.setAngle(currentAngle);
 
     entity.stats = stats;
     entity.currentRpm = currentRpm;
@@ -4593,6 +4618,50 @@ function handleMultiplayerMessage(data: unknown) {
         return;
     }
 
+    if (message.type === 'latency_ping' && multiplayer.role === 'guest') {
+        if (typeof message.sequence !== 'number' || typeof message.hostSentAt !== 'number') return;
+        const guestReceivedAt = performance.now();
+        const guestSentAt = performance.now();
+        sendMultiplayerMessage({
+            type: 'latency_pong',
+            sequence: message.sequence,
+            hostSentAt: message.hostSentAt,
+            guestReceivedAt,
+            guestSentAt
+        });
+        return;
+    }
+
+    if (message.type === 'latency_pong' && multiplayer.role === 'host') {
+        if (
+            typeof message.sequence !== 'number'
+            || message.sequence !== multiplayer.pendingLatencyPing
+            || typeof message.hostSentAt !== 'number'
+            || typeof message.guestReceivedAt !== 'number'
+            || typeof message.guestSentAt !== 'number'
+        ) return;
+        const hostReceivedAt = performance.now();
+        multiplayer.latencySamples.push(calculateLatencySample(
+            message.hostSentAt,
+            message.guestReceivedAt,
+            message.guestSentAt,
+            hostReceivedAt
+        ));
+        multiplayer.pendingLatencyPing = null;
+        if (multiplayer.latencySamples.length >= LATENCY_SAMPLE_COUNT) finishLatencyMeasurement();
+        else window.setTimeout(sendNextLatencyPing, 25);
+        return;
+    }
+
+    if (message.type === 'latency_config' && multiplayer.role === 'guest') {
+        if (typeof message.inputDelayMs !== 'number' || typeof message.hostMinusGuestMs !== 'number') return;
+        multiplayer.inputDelayMs = Math.max(1, message.inputDelayMs);
+        multiplayer.hostMinusLocalMs = message.hostMinusGuestMs;
+        multiplayer.latencyReady = true;
+        setMultiplayerStatus('Connected');
+        return;
+    }
+
     if (message.type === 'ready' && multiplayer.role !== 'solo') {
         if (message.stats) applyRemoteStats(message.stats as BeybladeStats);
         if (typeof message.launchAngle === 'number') multiplayer.remoteLaunchAngle = message.launchAngle;
@@ -4603,20 +4672,41 @@ function handleMultiplayerMessage(data: unknown) {
     }
 
     if (message.type === 'dive' && multiplayer.role !== 'solo') {
-        if (typeof message.id !== 'string' || typeof message.applyAt !== 'number') return;
+        if (typeof message.id !== 'string' || typeof message.gameTime !== 'number') return;
         if (message.action !== 'dive_on' && message.action !== 'dive_off') return;
-        queueDiveEvent({
+        scheduleDiveInput({
             id: message.id,
-            side: 'enemy',
-            action: message.action,
-            applyAt: message.applyAt
+            body: enemy.physicsIndex,
+            diving: diveActionToPattern(message.action) === 1 ? 1 : 0,
+            gameTime: message.gameTime
         });
         return;
     }
 
-    if (message.type === 'state' && multiplayer.role !== 'solo') {
-        if (!message.player || !message.enemy) return;
-        applyRemoteMatterWorldState(message as Extract<TMultiplayerMessage, { type: 'state' }>);
+    if (message.type === 'start' && multiplayer.role === 'guest') {
+        if (
+            typeof message.startAtHostMs !== 'number'
+            || typeof message.inputDelayMs !== 'number'
+            || !message.snapshot
+        ) return;
+        multiplayer.inputDelayMs = message.inputDelayMs;
+        multiplayer.matchStartHostMs = message.startAtHostMs;
+        physicsWorld.restore(fromCanonicalSnapshot(message.snapshot as PhysicsSnapshot));
+        rollbackPhysics.resetHistory();
+        syncMatchStateFromPhysics();
+        syncDivePresentationFromPhysics();
+        scheduleSynchronizedLaunch(message.startAtHostMs);
+        return;
+    }
+
+    if (message.type === 'authority' && multiplayer.role === 'guest') {
+        if (!message.snapshot || typeof message.checksum !== 'string') return;
+        const canonical = message.snapshot as PhysicsSnapshot;
+        if (checksumSnapshot(canonical) !== message.checksum) return;
+        reopenOutcomeAfterRollback();
+        rollbackPhysics.applyAuthoritativeSnapshot(fromCanonicalSnapshot(canonical));
+        syncMatchStateFromPhysics();
+        syncDivePresentationFromPhysics();
         return;
     }
 
@@ -4647,6 +4737,7 @@ function bindMultiplayerConnection(conn: DataConnection) {
         }
         sendMultiplayerMessage({ type: 'hello', stats: cloneStats(PLAYER_STATS), name: 'Player' });
         sendHostGameSpeed();
+        if (multiplayer.role === 'host') beginLatencyMeasurement();
         if (multiplayer.localReady) sendMultiplayerReady();
     });
     conn.on('data', handleMultiplayerMessage);
@@ -4664,7 +4755,7 @@ function startMultiplayerHost() {
     multiplayer.peer = peer;
     peer.on('open', (id) => {
         multiplayer.peerId = id;
-        multiplayer.joinLink = createJoinLink(id);
+        multiplayer.joinLink = createInviteUrl(window.location.href, id);
         setMultiplayerStatus('Hosting');
     });
     peer.on('connection', (conn) => {
@@ -4683,7 +4774,8 @@ function joinMultiplayerHost(hostPeerId: string) {
     setMultiplayerStatus('Joining');
     const peer = new Peer(getPeerOptions());
     multiplayer.peer = peer;
-    peer.on('open', () => {
+    peer.on('open', (id) => {
+        multiplayer.peerId = id;
         const conn = peer.connect(hostPeerId.trim(), { reliable: true });
         bindMultiplayerConnection(conn);
     });
@@ -4691,16 +4783,33 @@ function joinMultiplayerHost(hostPeerId: string) {
 }
 
 function autoJoinFromUrl() {
-    const peerId = new URLSearchParams(window.location.search).get('joinPeer');
-    if (peerId) joinMultiplayerHost(peerId);
+    const peerId = getInvitePeerId(window.location.href);
+    if (!peerId) return false;
+    localPlayMode = '1p-easy';
+    joinMultiplayerHost(peerId);
+    return true;
 }
 
-function getPeerIdFromInput(rawValue: string) {
+async function copyTextToClipboard(value: string) {
     try {
-        return new URL(rawValue).searchParams.get('joinPeer') || rawValue;
+        if (navigator.clipboard) {
+            await navigator.clipboard.writeText(value);
+            return;
+        }
     } catch {
-        return rawValue;
+        // Fall through for browsers that deny the async clipboard API.
     }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.readOnly = true;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    textarea.remove();
+    if (!copied) throw new Error('clipboard copy was rejected');
 }
 
 function showOnlineDialog() {
@@ -4711,25 +4820,18 @@ function showOnlineDialog() {
     overlay.innerHTML = `
         <div class="tutorial-panel menu-panel">
             <span class="kicker">Online</span>
-            <h1>Lobby</h1>
-            <div class="multiplayer-lobby-grid">
+            <h1>${multiplayer.role === 'guest' ? 'Joining match' : 'Invite a player'}</h1>
+            <div class="multiplayer-lobby-grid invite-only">
                 <section class="multiplayer-card">
                     <div class="multiplayer-card-head">
-                        <span>Host</span>
+                        <span>${multiplayer.role === 'guest' ? 'Guest' : 'Host'}</span>
                         <div class="multiplayer-status">${getMultiplayerStatusText()}</div>
                     </div>
                     <div class="multiplayer-card-body">
-                        <input class="multiplayer-link" id="online-host-link" readonly value="${multiplayer.joinLink}" placeholder="Host link appears here">
-                        <button class="action-btn save" id="online-host-match">Host</button>
-                    </div>
-                </section>
-                <section class="multiplayer-card">
-                    <div class="multiplayer-card-head">
-                        <span>Join</span>
-                    </div>
-                    <div class="multiplayer-card-body multiplayer-join-row">
-                        <input id="online-peer-id" placeholder="Paste host peer id or join URL">
-                        <button class="action-btn save" id="online-join-match">Join</button>
+                        ${multiplayer.role === 'guest'
+                            ? '<p class="multiplayer-invite-help">Connecting to the host from this invite…</p>'
+                            : `<p class="multiplayer-invite-help">Send the invite link to the second player.</p>
+                               <button class="action-btn save multiplayer-copy-invite" id="online-copy-invite" ${multiplayer.joinLink ? '' : 'disabled'}>${multiplayer.joinLink ? 'Click to copy invite link' : 'Creating invite link…'}</button>`}
                     </div>
                 </section>
             </div>
@@ -4741,20 +4843,14 @@ function showOnlineDialog() {
     `;
     document.body.appendChild(overlay);
 
-    overlay.querySelector('#online-host-match')?.addEventListener('click', () => {
-        localPlayMode = '1p-easy';
-        startMultiplayerHost();
-    });
-    overlay.querySelector('#online-join-match')?.addEventListener('click', () => {
-        const rawValue = overlay.querySelector<HTMLInputElement>('#online-peer-id')?.value.trim() || '';
-        localPlayMode = '1p-easy';
-        joinMultiplayerHost(getPeerIdFromInput(rawValue));
-    });
-    overlay.querySelector<HTMLInputElement>('#online-host-link')?.addEventListener('click', async (event) => {
-        const input = event.currentTarget as HTMLInputElement;
-        input.select();
-        if (input.value && navigator.clipboard) {
-            await navigator.clipboard.writeText(input.value);
+    overlay.querySelector<HTMLButtonElement>('#online-copy-invite')?.addEventListener('click', async (event) => {
+        const button = event.currentTarget as HTMLButtonElement;
+        if (!multiplayer.joinLink) return;
+        try {
+            await copyTextToClipboard(multiplayer.joinLink);
+            button.textContent = 'Invite link copied';
+        } catch {
+            button.textContent = 'Copy failed';
         }
     });
     overlay.querySelector('#online-back')?.addEventListener('click', () => {
@@ -4861,6 +4957,10 @@ function showMenuDialog() {
     });
     overlay.querySelector('#menu-online')?.addEventListener('click', () => {
         overlay.remove();
+        if (multiplayer.role === 'solo') {
+            localPlayMode = '1p-easy';
+            startMultiplayerHost();
+        }
         showOnlineDialog();
     });
     overlay.querySelector('#menu-tutorial')?.addEventListener('click', () => {
@@ -4874,8 +4974,8 @@ function showMenuDialog() {
 }
 
 topMenuBtn.onclick = showMenuDialog;
-showMenuDialog();
-autoJoinFromUrl();
+if (autoJoinFromUrl()) showOnlineDialog();
+else showMenuDialog();
 
 animate();
 
@@ -5046,23 +5146,23 @@ const resetEntityVisualsAndPhysics = (entity: GameEntity, stats: BeybladeStats, 
 
     // 3. Update Physics Body
     const density = stats.densityBase * stats.wt;
-    Body.setDensity(entity.body, density);
+    physicsWorld.configureBody(entity.physicsIndex, toPhysicsBodyConfig(stats));
+    entity.body.density = density;
     entity.body.restitution = stats.restitution;
     entity.body.friction = stats.friction;
     entity.body.frictionAir = stats.frictionAir;
 
     // Reset Physics State
-    Body.setPosition(entity.body, startPos);
-    Body.setVelocity(entity.body, { x: 0, y: 0 });
-    Body.setAngularVelocity(entity.body, 0);
-    Body.setAngle(entity.body, 0);
+    entity.body.setPosition(startPos);
+    entity.body.setVelocity({ x: 0, y: 0 });
+    entity.body.setAngularVelocity(0);
+    entity.body.setAngle(0);
 
     // Clear all forces and torques
     entity.body.force = { x: 0, y: 0 };
     entity.body.torque = 0;
 
-    // Wake the body to ensure physics updates, then it will settle
-    Body.setStatic(entity.body, false);
+    entity.body.setActive(true);
 
     // Reset Visual Position
     entity.mesh.position.set(startPos.x, getArenaHeight(startPos.x, startPos.y) + 10, startPos.y); // Matter Y is Three Z
@@ -5103,12 +5203,12 @@ function resetMatch() {
     activeKoBlankOverlay = null;
     clearLaunchCountdown();
     resetMatchCounters();
+    physicsWorld.reset();
     multiplayer.localReady = false;
     multiplayer.remoteReady = false;
     multiplayer.localLaunchAngle = DEFAULT_LAUNCH_ANGLE;
     multiplayer.remoteLaunchRequested = false;
     multiplayer.remoteLaunchAngle = DEFAULT_LAUNCH_ANGLE;
-    resetMultiplayerDiveQueue();
     twoPlayerLaunchStep = 'p1';
     twoPlayerLaunchAngles = { p1: DEFAULT_LAUNCH_ANGLE, p2: 0 };
     localDiveIntent = 0;
@@ -5145,10 +5245,9 @@ function resetMatch() {
         resetEntityVisualsAndPhysics(player, PLAYER_STATS, { x: 0, y: 100 });
         resetEntityVisualsAndPhysics(enemy, ENEMY_STATS, { x: 0, y: -100 });
     }
-    // Ensure bodies are in world (safe add)
-    Composite.remove(engine.world, player.body);
-    Composite.remove(engine.world, enemy.body);
-    Composite.add(engine.world, [player.body, enemy.body]);
+    player.body.setActive(true);
+    enemy.body.setActive(true);
+    resetMultiplayerNetcode();
 
     // Show UI
     launchContainer.style.display = 'flex';
@@ -5157,6 +5256,9 @@ function resetMatch() {
     guideMesh.visible = true;
     syncLaunchSetupUi();
     syncHudButtonColors();
+    if (multiplayer.role === 'host' && multiplayer.conn?.open) {
+        window.setTimeout(beginLatencyMeasurement, 0);
+    }
 }
 
 function clearWinnerOverlay() {
