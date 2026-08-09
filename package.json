@@ -4,19 +4,20 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host",
     "build": "tsc && vite build",
+    "test": "tsx --test tests/**/*.test.ts",
     "preview": "vite preview"
   },
   "devDependencies": {
-    "@types/matter-js": "^0.20.2",
+    "@types/node": "^26.1.2",
+    "tsx": "^4.23.1",
     "typescript": "~5.9.3",
     "vite": "^7.3.1"
   },
   "dependencies": {
     "@types/three": "^0.182.0",
     "@vercel/analytics": "^2.0.1",
-    "matter-js": "^0.20.0",
     "peerjs": "^1.5.5",
     "three": "^0.182.0"
   }
